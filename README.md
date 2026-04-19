@@ -234,6 +234,40 @@ sink that pipes frames into an encoder + muxer, an
 `WindowSink` for live preview, etc. Any of these can slot in without
 changing the scene or renderer.
 
+## Automatic pixel-format adaptation
+
+Pixel formats get handled transparently in two places:
+
+**Inbound** (source → scene): a `Video` / `Image` / `Live` object's
+source frames can be in any pixel format the decoder produces —
+YUV420P, YUV444P, BGRA, RGB24, NV12, whatever. The renderer converts
+them to the canvas's pixel format before compositing via
+[`adapt_frame_to_canvas`]. Writers of per-object samplers call this
+once on each pulled frame; canvases that don't declare a raster
+format (vector canvases for PDF export) short-circuit the conversion.
+
+**Outbound** (scene → sink): when a sink expects a pixel format that
+differs from the scene's canvas — e.g. a JPEG writer wants RGB24
+while the scene composes in YUV420P — wrap the source in
+[`AdaptedSource`]:
+
+```rust
+use oxideav_scene::{AdaptedSource, RenderedSource, Scene, StubRenderer};
+use oxideav_core::PixelFormat;
+
+let scene = Scene::default();                     // canvas: Yuv420P
+let src = RenderedSource::new(scene, StubRenderer);
+let adapted = AdaptedSource::new(src, PixelFormat::Rgba);
+// adapted.format().canvas now reports Rgba; pulled frames are
+// transparently converted on the way out.
+```
+
+Both paths delegate to [`oxideav-pixfmt`](https://crates.io/crates/oxideav-pixfmt)
+— the same conversion matrix used across oxideav.
+
+[`adapt_frame_to_canvas`]: https://docs.rs/oxideav-scene/latest/oxideav_scene/adapt/fn.adapt_frame_to_canvas.html
+[`AdaptedSource`]: https://docs.rs/oxideav-scene/latest/oxideav_scene/adapt/struct.AdaptedSource.html
+
 
 - `Image` samplers hold a cached decoded `VideoFrame`.
 - `Video` samplers advance their demuxer/decoder to the requested PTS
@@ -295,6 +329,7 @@ src/
 ├── audio.rs         — AudioCue + AudioSource
 ├── render.rs        — SceneRenderer + SceneSampler traits + StubRenderer
 ├── source.rs        — SceneSource + SceneSink + drive() + RenderedSource + NullSink / FnSink
+├── adapt.rs         — pixel-format adaptation (inbound + outbound, via oxideav-pixfmt)
 ├── duration.rs      — SceneDuration + Lifetime
 ├── id.rs            — ObjectId (stable, editable)
 └── ops.rs           — Operation enum for the streaming compositor

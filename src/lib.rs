@@ -37,6 +37,7 @@
 //!   implements. Current default ([`StubRenderer`]) always returns
 //!   `Error::Unsupported`.
 
+pub mod adapt;
 pub mod animation;
 pub mod audio;
 pub mod duration;
@@ -47,6 +48,7 @@ pub mod render;
 pub mod scene;
 pub mod source;
 
+pub use adapt::{adapt_frame_to, adapt_frame_to_canvas, AdaptedSource};
 pub use animation::{AnimatedProperty, Animation, Easing, Keyframe, KeyframeValue, Repeat};
 pub use audio::{AudioCue, AudioSource, DuckBus};
 pub use duration::{Lifetime, SceneDuration, TimeStamp};
