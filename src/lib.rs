@@ -45,6 +45,7 @@ pub mod object;
 pub mod ops;
 pub mod render;
 pub mod scene;
+pub mod source;
 
 pub use animation::{AnimatedProperty, Animation, Easing, Keyframe, KeyframeValue, Repeat};
 pub use audio::{AudioCue, AudioSource, DuckBus};
@@ -57,3 +58,4 @@ pub use object::{
 pub use ops::{ExportOp, Operation};
 pub use render::{RenderedFrame, SceneRenderer, SceneSampler, StubRenderer};
 pub use scene::{Background, Metadata, Scene};
+pub use source::{drive, FnSink, NullSink, RenderedSource, SceneSink, SceneSource, SourceFormat};

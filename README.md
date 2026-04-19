@@ -44,7 +44,8 @@ rendering, encoding, or file-format I/O yet — those land as follow-ups.
 pub struct Scene {
     pub canvas: Canvas,               // pixel dims OR a vector-coord PDF page
     pub duration: SceneDuration,      // Finite(dur) | Indefinite (streaming)
-    pub time_base: TimeBase,          // rational — matches oxideav-core
+    pub time_base: TimeBase,          // rational tick granularity
+    pub framerate: Rational,          // output render cadence (e.g. 30/1, 24000/1001)
     pub sample_rate: u32,             // audio rate for the mix bus
     pub background: Background,       // solid colour / image / gradient / transparent
     pub objects: Vec<SceneObject>,    // z-ordered painter's algorithm
@@ -54,9 +55,17 @@ pub struct Scene {
 ```
 
 A scene is addressed in its own `time_base` — same rational type oxideav
-uses everywhere. `SceneDuration::Indefinite` signals a streaming scene:
-no end, no rewinding, the composition is driven forward by wall-clock
-time + operation messages.
+uses everywhere. `framerate` is separate: `time_base` sets the tick
+granularity of every scheduled event (keyframe, lifetime, audio cue
+trigger); `framerate` sets the cadence at which the renderer samples the
+scene and emits frames to a sink. A scene at `time_base = 1/1000` (ms)
+and `framerate = 30/1` renders at `t = 0, 33, 66, 100, …` ms. Videos
+included via `ObjectKind::Video` are retimed by the renderer so their
+per-frame PTS aligns with this cadence.
+
+`SceneDuration::Indefinite` signals a streaming scene: no end, no
+rewinding, the composition is driven forward by wall-clock time +
+operation messages.
 
 ### Canvas
 
@@ -194,6 +203,38 @@ transforms + animations at `t`, clipping against the canvas, and
 compositing via the `BlendMode`. The renderer delegates per-object
 content fetching to each `ObjectKind`'s own sampler:
 
+## Source / Sink
+
+A scene acts as a **source** of rendered frames. Wrap a `Scene` plus
+a `SceneRenderer` in a `RenderedSource` and the resulting value
+implements `SceneSource`: one `pull()` per frame at the scene's
+`framerate`, timestamps auto-advanced by `1 / framerate`. Finite
+scenes signal end-of-stream by returning `None`; indefinite scenes
+run until externally stopped.
+
+Consumers implement `SceneSink` — `init(&SourceFormat)` once, `push`
+per frame, `finalise()` at end. The helper `drive(source, sink)` runs
+the pull loop:
+
+```rust
+use oxideav_scene::{drive, RenderedSource, NullSink, StubRenderer, Scene};
+
+let scene = Scene {
+    framerate: oxideav_core::Rational::new(30, 1),
+    ..Scene::default()
+};
+let mut src = RenderedSource::new(scene, StubRenderer);  // real renderer goes here
+let mut sink = NullSink::default();
+// drive(&mut src, &mut sink)?;  // when the real renderer lands
+```
+
+Downstream crates provide the real sinks — an `oxideav-scene-encode`
+sink that pipes frames into an encoder + muxer, an
+`oxideav-scene-rtmp` sink that writes to an RTMP endpoint, a
+`WindowSink` for live preview, etc. Any of these can slot in without
+changing the scene or renderer.
+
+
 - `Image` samplers hold a cached decoded `VideoFrame`.
 - `Video` samplers advance their demuxer/decoder to the requested PTS
   and return the most recent frame.
@@ -252,7 +293,8 @@ src/
 ├── object.rs        — SceneObject + ObjectKind + Transform + BlendMode
 ├── animation.rs     — Animation + Keyframe + Easing + interpolation
 ├── audio.rs         — AudioCue + AudioSource
-├── render.rs        — SceneRenderer + SceneSampler traits
+├── render.rs        — SceneRenderer + SceneSampler traits + StubRenderer
+├── source.rs        — SceneSource + SceneSink + drive() + RenderedSource + NullSink / FnSink
 ├── duration.rs      — SceneDuration + Lifetime
 ├── id.rs            — ObjectId (stable, editable)
 └── ops.rs           — Operation enum for the streaming compositor
