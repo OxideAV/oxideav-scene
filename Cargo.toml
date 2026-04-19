@@ -1,0 +1,17 @@
+[package]
+name = "oxideav-scene"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-scene"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust time-based scene / composition model for oxideav — PDF pages, RTMP streaming compositor, NLE timelines on one data model"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-scene"
+keywords = ["multimedia", "scene", "compositor", "timeline", "pure-rust"]
+categories = ["multimedia::video"]
+
+[dependencies]
+oxideav-core = "0.1"
