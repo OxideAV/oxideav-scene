@@ -235,18 +235,41 @@ Justification: `Text` and `Shape` stay first-class because PDF's vector export n
 // Serves: all three. Same fields as today, two changes:
 // - `lifetime: Lifetime` → `range: Range` (rename).
 // - `effects: Vec<Effect>` effect params now typed (see below).
+//
+// Every tweakable scalar on this struct — position components, scale,
+// opacity, each effect param — is animatable via entries in
+// `animations`.  A Keyframe targets a `PropertyPath` on this object
+// and the renderer samples the interpolated value at render time.
+// So "video source zooms in over 2 seconds" is a `Transform.scale`
+// animation on the SceneObject wrapping the VideoSource.  "Picture-
+// in-picture fades out" is an `Opacity` animation.  "Rounded corners
+// expand" is an animation on the `corner_radius` param of a
+// `rounded_mask` Effect.  The Source underneath is untouched.
 #[derive(Clone, Debug)]
 pub struct SceneObject {
     pub id: ObjectId,
-    pub kind: ObjectKind,
-    pub transform: Transform,
-    pub range: Range,
-    pub animations: Vec<Animation>,
+    pub kind: ObjectKind,              // Media(Source) | Text | Shape
+    pub transform: Transform,           // position, scale, rotation
+    pub range: Range,                   // time-axis lifetime (N/A on Paged)
+    pub animations: Vec<Animation>,     // keyframe tracks over any PropertyPath
     pub z_order: i32,
     pub opacity: f32,
     pub blend_mode: BlendMode,
-    pub effects: Vec<Effect>,
+    pub effects: Vec<Effect>,           // filter chain (colour, blur, sharpen, …)
+    pub style: Option<Style>,           // decorative framing (see below)
     pub clip: Option<ClipRect>,
+}
+
+/// Decorative framing applied as part of the object's composite —
+/// separate from the content-transforming `effects` chain because
+/// a rounded-border picture-in-picture is visually paired with the
+/// source but isn't a filter over the source pixels. Examples:
+/// rounded corners, drop shadow, outer stroke, inner glow.
+#[derive(Clone, Debug, Default)]
+pub struct Style {
+    pub corner_radius: f32,             // px; 0 = no rounding
+    pub border: Option<Border>,         // stroke colour + width
+    pub drop_shadow: Option<DropShadow>,
 }
 
 #[derive(Clone, Debug)]
@@ -438,6 +461,34 @@ Canonical JSON for a live compositor scene with one live camera, a pre-rendered 
 ```
 
 Key design points for serde: `Axis` is tagged-enum; `ContainerKind` / `ObjectKind` / `SourceSpec` are tagged-enums; `Source` trait objects serialize via their underlying `SourceSpec` (which is `Clone + Serialize`); `op_log` is optional (only present for compositor replay + NLE undo history). A PDF scene serializes with `axis: { paged: {...} }`, empty `op_log`, and a `Page`-container per page as the roots under `Stage` — nothing else in the format is PDF-specific. A video-embedded-in-PDF is a plain `media.file` child of the owning `Page` container.
+
+## Source kinds legal per axis
+
+PDF / Paged scenes accept only _resolvable-at-author-time_ sources; the exporter has to bake a finished document. Time-based scenes accept everything including live streams.
+
+| `SourceSpec` variant | `Paged` (PDF) | `Range` (NLE) | `Unbounded` (compositor) |
+|---|:-:|:-:|:-:|
+| `File { kind: Image }`       | ✅ | ✅ | ✅ |
+| `File { kind: Video }`       | ✅ (embedded media clip; viewer triggers) | ✅ | ✅ |
+| `File { kind: Audio }`       | ✅ (less common in PDF) | ✅ | ✅ |
+| `Bytes { … }`                 | ✅ | ✅ | ✅ |
+| `DecodedFrame(…)`             | ✅ (pre-rendered bitmap of a page region) | ✅ | ✅ |
+| `Live { uri, … }`             | ❌ rejected at validation | ✅ | ✅ |
+| `Generator(…)`                | ✅ if deterministic (e.g. noise at frozen seed) | ✅ | ✅ |
+| text / shape / vector         | ✅ (object-kind, not Source)  | ✅ | ✅ |
+
+Validation runs at scene-construction time: pushing a `Live` source into a scene whose axis is `Paged` returns `Error::invalid` with a message that points at the axis–source mismatch. The Scene type itself doesn't need a generic parameter for this — the check is a method on `Scene::validate()`.
+
+## Scene ≡ PDF at the data level
+
+The overlap between "a Scene" and "a PDF page" is complete at the data model: both are sets of positioned objects (text runs, vector shapes, images, possibly video clips) on a canvas. The differences are purely:
+
+1. **Axis**: PDF scenes use `Axis::Paged`; video scenes use `Axis::Range` or `Axis::Unbounded`.
+2. **Object lifetime**: PDF objects are pinned to a specific `Page` container (their "lifetime" is being a child of that page). Video scene objects use `Range { start, end }` on the time axis.
+3. **Source kind restrictions** (see the table above).
+4. **Animation semantics**: on a PDF scene the exporter samples animations at a single instant (the page is static); on a time-based scene the renderer samples at each frame.
+
+None of these differences warrant separate types. One `Scene` struct + one `SceneObject` struct + one `Source` enum cover both, and the PDF exporter / video renderer just consult the axis + source kinds to decide what's legal and how to unfold time (or skip it).
 
 ## Migration plan
 
