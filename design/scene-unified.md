@@ -1,12 +1,52 @@
 # Scene Unified Design
 
+> **Revision 2 — scope clarifications from user feedback.**
+>
+> - **PDF is still a Scene.** Each page is a discrete composition of
+>   objects; the Scene abstraction holds. The difference is that a
+>   PDF's axis is a **page index**, not a timeline, and **no object
+>   survives between pages** — each page container has its own set
+>   of objects. There's no interpolation between pages; moving from
+>   page 2 to page 3 is a hard swap to a different object set.
+> - **Embedded videos in a PDF are `VideoSource`s, not nested
+>   Scenes.** An embedded video is just a media object with a
+>   Source that happens to be a video stream — sampled when the
+>   viewer plays it, independent of the page it lives on.
+> - **Scenes are not nestable as first-class objects.** Earlier
+>   drafts of this doc tried to add a `SourceSpec::NestedScene`
+>   variant. User feedback: there's no compelling case.
+>   Picture-in-picture is just a second `VideoSource`. Reusable
+>   templates overwrite a target scene rather than being embedded.
+>   For the "use an intro scene inside another scene" case, the
+>   pattern is to _render_ the inner scene (to disk or to an
+>   in-memory producer) and consume its output as a regular
+>   `VideoSource` — no new variant needed, no renderer
+>   recursion to reason about, no vector-flow-through edge case.
+>   If we discover a concrete need for real nesting later, we can
+>   add it; the current model intentionally doesn't include it.
+> - **A Scene's "feature set" is data-driven.** A scene with no
+>   video / audio / animation doesn't meaningfully have a framerate
+>   or a sample rate; those fields exist in the struct but are
+>   ignored. A paged scene (PDF) has no framerate semantics. A
+>   compositor scene doesn't use the `Axis::Range` variant. One
+>   type, many shapes.
+> - **Scene-to-scene transitions are the common "transition" case**,
+>   not clip-level cross-fades inside one scene. Most videos are a
+>   single scene per piece of content; cross-fade / cut / wipe
+>   between two scenes at the output level is the "image transition"
+>   users mean. This revision adds a `Program` layer that sequences
+>   full scenes with transitions between them. Clip-level cross-
+>   fades inside a single scene are still expressible (for
+>   splitscreen fades and overlay ramps) but they're not the primary
+>   meaning of "transition".
+
 ## Summary
 
-The current `oxideav-scene` scaffold already reaches cleanly across the three target workloads in its most load-bearing primitives — `Canvas` already encodes raster-vs-vector, `Animation` + `Keyframe` are generic, `Operation` already sketches a mutation DSL, and the source/sink abstraction in `source.rs` is use-case-agnostic. The rest of the scaffold leans toward the live-compositor case: `Scene::objects: Vec<SceneObject>` is flat (no tracks, no layers, no pages), `SceneDuration` is a two-variant enum that cannot express a bounded-finite NLE export window alongside a live stream, and `Lifetime` is intrinsically time-based rather than "range-on-an-axis" (pages, frames, wall-clock).
+The current `oxideav-scene` scaffold already reaches cleanly across the three target workloads in its most load-bearing primitives — `Canvas` cleanly distinguishes raster from vector, `Animation` + `Keyframe` are generic, `Operation` sketches a mutation DSL, and the source/sink abstraction in `source.rs` is use-case-agnostic. The rest of the scaffold leans toward the live-compositor case: `Scene::objects: Vec<SceneObject>` is flat (no tracks, no layers, no pages), `SceneDuration` is a two-variant enum that cannot express a bounded NLE window alongside a live stream alongside a multi-page document, and `Lifetime` is intrinsically time-based rather than "range on the scene's axis".
 
-The principal tension the unified model must resolve is that PDF, compositor, and NLE all compose the same objects against _different axes_ — PDF against a paged-document axis, compositor against unbounded wall-clock, NLE against a bounded timecoded axis — and all mutate the same primitives via _different vocabularies_ — compositor `Operation`s, NLE edit history, and PDF's "author composes once" workflow. If we abstract the axis and the mutation stream, the rest of the model (objects, transforms, animations, sources, effects) can stay generic across the three.
+The principal tension the unified model must resolve is that PDF, compositor, and NLE all compose the same objects against _different axes_ — PDF against page index, compositor against unbounded wall-clock, NLE against a bounded timecoded range — and all mutate the same primitives via _different vocabularies_ — compositor `Operation`s, NLE edit history, and PDF's author-once workflow. If we abstract the axis and the mutation stream, the rest of the model (objects, transforms, animations, sources, effects) stays generic across the three. Features that don't apply to a given scene (e.g. framerate on a paged PDF) exist in the type but have trivial values — no separate type hierarchy needed.
 
-This doc proposes a unified `Axis` type replacing `SceneDuration`, a unified `Container` hierarchy replacing the flat `objects` vec (tracks/layers/pages are all `Container` kinds), a `Source` trait with a flat variant enum replacing the split `ImageSource` / `VideoSource` / `LiveStreamHandle` / `AudioSource`, and a single `SceneOp` enum that serves compositor mutations, NLE edit history, and (no-op by default) PDF authoring. The renderer trait splits into a small `Compose` core plus three capability traits — `RasterRender`, `VectorExport`, `LiveDrive` — that different concrete renderers implement à la carte. Migration is mostly additive: most current type names survive, with two significant renames (`SceneDuration` → `Axis`, `Lifetime` → `Range`) and one structural shift (`objects: Vec<SceneObject>` → `root: Container`).
+This doc proposes a unified `Axis` type replacing `SceneDuration` (variants: `Range`, `Unbounded`, `Paged`, `Instant`), a unified `Container` hierarchy replacing the flat `objects` vec (tracks, layers, and pages are all `Container` kinds), a `Source` trait with a flat variant enum replacing the split `ImageSource` / `VideoSource` / `LiveStreamHandle` / `AudioSource`, and a single `SceneOp` enum that serves all three mutation vocabularies. The renderer trait splits into a small `Compose` core plus capability traits — `RasterRender` (pixels), `VectorExport` (PDF ops), `LiveDrive` (wall-clock + back-pressure) — that different concrete renderers implement à la carte. A separate `Program` type sequences multiple `Scene`s with between-scene transitions (cut, cross-fade, wipe, dip-to-black). **Scenes are not nestable as a Scene variant**; when one scene needs to appear inside another (intro-scene-as-clip), the inner scene is rendered and consumed as a regular `VideoSource`. Migration is mostly additive: most current type names survive, with two significant renames (`SceneDuration` → `Axis`, `Lifetime` → `Range`) and one structural shift (`objects: Vec<SceneObject>` → `root: Container`).
 
 ## Scaffold audit
 
@@ -37,27 +77,33 @@ This doc proposes a unified `Axis` type replacing `SceneDuration`, a unified `Co
 
 ## Cross-cutting tensions and resolutions
 
-1. **Duration vs axis.** `SceneDuration::{Finite,Indefinite}` collapses three distinct "axes of progression" into a boolean. PDF progresses by page, compositor by wall-clock, NLE by timecode-bounded-range. **Resolve:** introduce `Axis` with four variants — `Instant` (PDF single page still), `Paged(count)` (PDF multi-page), `Range { start, end }` (NLE export window or any bounded segment), `Unbounded { epoch }` (compositor wall-clock from an epoch). Keep `TimeStamp = i64` in `time_base` ticks for all cases; pages are integer ticks on a page-tick time base (`1/1` page-per-unit).
+1. **Duration vs axis.** `SceneDuration::{Finite,Indefinite}` collapses four distinct "axes of progression" into a boolean. PDF progresses by page, compositor by wall-clock, NLE by timecode-bounded-range, a single-frame export is an instant. **Resolve:** introduce `Axis` with four variants — `Instant` (single-frame), `Paged { count }` (PDF), `Range { start, end }` (NLE export window or any bounded segment), `Unbounded { epoch }` (compositor wall-clock from an epoch). `TimeStamp = i64` in `time_base` ticks for time-based axes; pages are integer indices (no interpolation between them).
 
-2. **Flat objects vs tracks vs layers vs pages.** Compositor wants a scene graph, NLE wants tracks, PDF wants pages. **Resolve:** replace `objects: Vec<SceneObject>` with `root: Container`, where `Container::kind` is `Stage` (root, always exactly one), `Page { index, media_box }` (PDF pages), `Track { kind: Video|Audio|Subtitle, index }` (NLE), `Layer { z_band: (i32, i32) }` (compositor logical layer), or `Group { transform: Transform }` (everything else). A `Container` has `children: Vec<Node>` where `Node = Container(Box<Container>) | Leaf(SceneObject)`. The tree preserves ordering, z-banding, and provenance.
+2. **Flat objects vs tracks vs layers vs pages.** Compositor wants a scene graph, NLE wants tracks, PDF wants pages. **Resolve:** replace `objects: Vec<SceneObject>` with `root: Container`, where `Container::kind` is `Stage` (root, always exactly one), `Page { index }` (PDF — each page owns its own distinct set of objects; no object lives across pages), `Track { kind: Video|Audio|Subtitle, index }` (NLE), `Layer { z_band: (i32, i32) }` (compositor logical layer), or `Group { transform: Transform }` (everything else). A `Container` has `children: Vec<Node>` where `Node = Container(Box<Container>) | Leaf(SceneObject)`. Page children are reachable only when rendering that page; swapping pages is a hard scene-graph swap, not an interpolation.
 
-3. **Static vs mutable state.** PDF is "author once and export", compositor is live mutation, NLE is mutation + undo. **Resolve:** `Scene` is always a pure data structure; mutation is always done via a `SceneOp` applied by an `OpInterpreter`. For live compositor, `OpInterpreter` consumes from a queue; for NLE, `OpInterpreter` appends to an `OpLog` with undo/redo; for PDF, the author builds the scene once — they can still go through `OpInterpreter` but typically use builder APIs.
+3. **Static vs mutable state.** PDF is author-once-and-export; compositor is live mutation; NLE is mutation + undo. **Resolve:** `Scene` is always a pure data structure; mutation always goes through a `SceneOp` applied by an `OpInterpreter`. For live compositor, `OpInterpreter` consumes from a queue. For NLE, `OpInterpreter` appends to an `OpLog` with undo/redo. For PDF, the author typically uses builder APIs but can still go through `OpInterpreter` if desired (useful for "programmatically generate a 1000-page PDF" workflows).
 
-4. **`Lifetime` vs clip in/out vs page range.** They are all "this thing exists between two points on the axis". **Resolve:** rename `Lifetime` to `Range<A: Axis>`; NLE clips use `Range<Time>`, PDF objects use `Range<Page>` (appears on pages a..b), compositor objects use `Range<Time>` with `end: Option<TimeStamp>`. One type, generic over the axis variant.
+4. **`Lifetime` vs clip in/out vs page membership.** Time-based scenes (NLE, compositor) have objects that live between two timecodes; PDF objects live on a specific page via the Page container, not via a time range. **Resolve:** rename `Lifetime` to `Range` and use it _only_ for time-axis scenes. PDF objects don't carry a `Range` — they're located in a specific Page container and that _is_ their lifetime. Put differently: `Range` is relevant only when `scene.axis` is `Range` or `Unbounded`.
 
-5. **Keyframed animations — same type, different interpretations.** Already clean. `Animation` over `TimeStamp` works for all three. PDF uses `Animation::sample(0)` always (single-instant scenes) — harmless.
+5. **Keyframed animations.** Already clean. `Animation` over `TimeStamp` works for both NLE and compositor. PDF scenes don't use animations on static content, but nothing stops a PDF from embedding an animated SVG-style object if someone wants to (rendered at a single instant, any animation ignored).
 
-6. **`Source` abstraction.** Currently split across four types with redundant `Path`/`EncodedBytes` variants. **Resolve:** unify into one `Source` enum with a `MediaKind` tag (`Image`|`Video`|`Audio`|`Live`|`NestedScene`) and shared variants (`File`, `Bytes`, `Decoded`, `Live`, `Generator`, `Proxy(low_res, full)`, `NestedScene(Arc<Scene>)`). Add `Source::resolve(t: TimeStamp) -> Result<Sample>` to trait.
+6. **Scene-level vs program-level transitions.** Users expect "image transitions" at the boundary between two full scenes, not as clip-level effects inside one scene. Most videos are a single scene per piece of content; cross-fading between two scenes is what "transition" usually means in a higher-level program. **Resolve:** add a `Program` type that sequences `Scene`s with a `Transition` between each adjacent pair. Clip-level cross-fades inside a single scene are still expressible via opacity animations on overlapping clips (NLE uses them for splitscreen and overlay fades), but the common case — "clip 1 ends, clip 2 starts, half-second cross-fade" — lives at the Program level.
 
-7. **Effect chains vs single Effect.** NLE wants per-clip effect chains with typed parameters; compositor just wants a filter list. Both are "Vec<Effect>" already; the type is fine. **Resolve:** keep `Vec<Effect>` on `SceneObject`, but widen `Effect::params` from `Vec<(String, f32)>` to `EffectParams` (a key→`KeyframeValue` map) so `EffectParam` keyframes remain well-typed.
+7. **`Source` abstraction.** Currently split across four types with redundant `Path`/`EncodedBytes` variants. **Resolve:** unify into one `Source` enum with a `MediaKind` tag (`Image`|`Video`|`Audio`|`Live`) and shared variants (`File`, `Bytes`, `Decoded`, `Live`, `Generator`, `Proxy(low_res, full)`). Add `Source::resolve(t: TimeStamp) -> Result<Sample>`. Notes: a video embedded in a PDF is just a `Source::File { kind: Video }` on a PDF-page `SceneObject` (playback is triggered by the viewer, not synced to the host). Picture-in-picture in a compositor is a second `Source::Live` — not a nested scene. The intro-scene-as-clip case renders the inner scene to produce a video stream that's consumed here as a regular `Source::File { kind: Video }` (or an in-memory `Source::Generator`).
 
-8. **Mutation ops vs edit ops.** Compositor `Operation` covers add/remove/animate; NLE needs ripple/roll/slip/slide/split. **Resolve:** one `SceneOp` enum with a "scene graph" layer (add/remove/move/setprop) and a "timeline" layer (ripple/roll/slip/slide/split/insert/overwrite) that are defined _in terms of_ graph ops. NLE records high-level edits and expands them at replay time; compositor sends low-level graph ops directly. Both go through the same `OpInterpreter`.
+8. **Effect chains vs single Effect.** NLE wants per-clip effect chains with typed parameters; compositor just wants a filter list. Both are "Vec<Effect>" already; the type is fine. **Resolve:** keep `Vec<Effect>` on `SceneObject`, but widen `Effect::params` from `Vec<(String, f32)>` to `EffectParams` (a key→`KeyframeValue` map) so `EffectParam` keyframes remain well-typed.
 
-9. **Units and transforms.** Currently `Transform` is unitless and `Canvas` carries the unit. This is fine as long as `Transform::position` is interpreted in the enclosing canvas's unit — but there's no enforcement. **Resolve:** keep `Transform` unitless but document the invariant; add `Length { value: f32, unit: LengthUnit }` helper for cases where an external type (e.g. PDF media box) needs a unit-tagged value. Normalized-to-canvas uses `LengthUnit::Normalized` (new variant, 0..=1 of containing canvas). NLE can use pixel or normalized interchangeably.
+9. **Mutation ops vs edit ops.** Compositor `Operation` covers add/remove/animate; NLE needs ripple/roll/slip/slide/split. **Resolve:** one `SceneOp` enum with a "scene graph" layer (add/remove/move/setprop) and a "timeline" layer (ripple/roll/slip/slide/split/insert/overwrite) that are defined _in terms of_ graph ops. NLE records high-level edits and expands them at replay time; compositor sends low-level graph ops directly. Both go through the same `OpInterpreter`.
 
-10. **Deterministic replay.** Compositor must replay an op-log + live-source log bit-exactly. **Resolve:** every `SceneOp` carries a `seq: u64` (monotonic) and an `at: TimeStamp` (scene-time the op applies). Simultaneous ops break ties by `seq`. Seeded PRNG lives on the `Scene` (field `seed: u64`); effects pull from a deterministic sub-stream indexed by `ObjectId`.
+10. **Units and transforms.** `Transform` is unitless; the enclosing `Canvas` carries the unit. **Resolve:** keep `Transform` unitless; document the invariant. For NLE + compositor, pixel units are the default. A future `LengthUnit::Normalized` (0..=1 of containing canvas) can land alongside without changing `Transform`.
 
-11. **Render API taxonomy.** One trait ≠ enough — rasterising a still, exporting PDF ops, driving a live encoder, and pre-computing NLE cache are four different things. **Resolve:** a tiny core `Compose` trait (produce an abstract `ComposedFrame` at time `t`) plus three capability traits — `RasterRender : Compose`, `VectorExport : Compose`, `LiveDrive : Compose` — that concrete renderers implement à la carte. `SceneRenderer` in the current sense becomes an alias for "implements `RasterRender`".
+11. **Deterministic replay.** Compositor must replay an op-log + live-source log bit-exactly. **Resolve:** every `SceneOp` carries a `seq: u64` (monotonic) and an `at: TimeStamp` (scene-time the op applies). Simultaneous ops break ties by `seq`. Seeded PRNG lives on the `Scene` (field `seed: u64`); effects pull from a deterministic sub-stream indexed by `ObjectId`.
+
+12. **Render API taxonomy.** One trait isn't enough — rasterising a frame, exporting PDF vector ops, pre-computing an NLE cache tile, and driving a live encoder with wall-clock deadlines are different surfaces. **Resolve:** a tiny core `Compose` trait (produce an abstract `ComposedFrame` at time/page `t`) plus three capability traits — `RasterRender : Compose` (pixels), `VectorExport : Compose` (PDF content-stream ops), `LiveDrive : Compose` (wall-clock + back-pressure) — that concrete renderers implement à la carte. A PDF exporter is `Compose + VectorExport`; a PDF→PNG rasteriser is `Compose + RasterRender`. An NLE exporter is `Compose + RasterRender`. A compositor is `Compose + RasterRender + LiveDrive`.
+
+13. **Scenes-inside-scenes.** The intro-scene-at-the-start-of-every-broadcast case needs solving, but not via a `SourceSpec::NestedScene` variant. **Resolve:** a `Scene` can _produce_ a video stream via its renderer; any consumer that wants to use that scene elsewhere loads the produced stream as a `VideoSource` (either via a temp file or an in-memory producer trait). No new source variant, no renderer recursion, no cross-canvas vector-flow-through edge case. The adapter is a higher-level concept (e.g. a `SceneAsVideoSource` wrapper in a later crate) and lives outside the core Scene type.
+
+14. **Scene-sequencing and transitions.** A `Program` is an ordered list of `Scene`s with an optional `Transition` between each adjacent pair. Transitions live _between_ scenes, not inside them. Primitive transitions: `Cut` (no blend), `CrossFade { duration }`, `Wipe { direction, duration }`, `DipToBlack { duration }`. A Program has its own `Axis::Range` computed from the sum of scene durations + transitions; the program renderer drives the current scene, overlaps with the next during a transition window, and composites the two. This is what "image transitions" mean in the common case.
 
 ## Proposed unified types
 
@@ -114,7 +160,9 @@ pub enum ContainerKind {
     Track { kind: TrackKind, index: u32 },
     Layer { z_band: (i32, i32) },
     Group,
-    NestedSequence(Arc<Scene>),         // NLE nested sequence, PDF form XObject
+    // (No `NestedSequence` — if you need a scene-inside-a-scene,
+    // render the inner scene and consume its output as a VideoSource
+    // on a leaf SceneObject.  Keeps the Container tree finite.)
 }
 
 #[non_exhaustive]
@@ -128,7 +176,7 @@ pub enum Node {
 }
 ```
 
-Justification: PDF needs pages-as-containers; NLE needs tracks-as-containers; compositor uses `Group`/`Layer` as containers for scene graph. The same recursion fits all three. NestedSequence covers NLE nested sequences and PDF form XObjects with one variant.
+Justification: PDF needs pages-as-containers; NLE needs tracks-as-containers; compositor uses `Group`/`Layer` as containers for scene graph. The same recursion fits all three. Scene-in-scene is deliberately excluded from the container kinds — the render-then-consume-as-video pattern handles the intro-scene-as-clip case without the complexity of a nested tree.
 
 ### Source trait (replaces `ImageSource` + `VideoSource` + `LiveStreamHandle` + `AudioSource`)
 
@@ -145,7 +193,7 @@ pub trait Source: Send + Sync + std::fmt::Debug {
 
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaKind { Image, Video, Audio, Live, NestedScene, Vector, Text }
+pub enum MediaKind { Image, Video, Audio, Live, Vector, Text }
 
 // Flat variant enum for serde + cheap clone.
 #[non_exhaustive]
@@ -157,7 +205,9 @@ pub enum SourceSpec {
     DecodedAudio { sample_rate: u32, channels: u8, samples: Arc<[f32]> },
     Live { uri: String, hint_size: Option<(u32, u32)>, hold_ms: u32 },
     Generator(Generator),
-    NestedScene(Arc<Scene>),            // compositor scene-in-scene, NLE nested seq
+    // No NestedScene variant — see §13. Scene-in-scene is expressed
+    // by rendering the inner scene upstream and passing its output
+    // here via Source::File (temp-disk) or Source::Generator (in-mem).
 }
 ```
 
@@ -336,7 +386,7 @@ Justification: compositor only ever emits Graph + Session ops; NLE emits Timelin
 
 ## Serialisation sketch
 
-Canonical JSON for a scene that mixes all three workloads — a live compositor whose inputs include a multi-page PDF as a `NestedScene` source and an NLE sequence as another nested scene:
+Canonical JSON for a live compositor scene with one live camera, a pre-rendered intro clip, and a file-based overlay (the intro clip was rendered from a separate scene in a prior pass — here it's just a video file):
 
 ```json
 {
@@ -350,7 +400,6 @@ Canonical JSON for a scene that mixes all three workloads — a live compositor 
     "id": 1,
     "kind": { "stage": {} },
     "transform": "identity",
-    "range": { "start": 0, "end": null },
     "children": [
       { "container": {
           "id": 2,
@@ -358,7 +407,7 @@ Canonical JSON for a scene that mixes all three workloads — a live compositor 
           "children": [
             { "leaf": {
                 "id": 100,
-                "kind": { "media": { "nested_scene": "ref:pdf_scene_001" } },
+                "kind": { "media": { "file": { "path": "/assets/intro.mkv", "kind": "video" } } },
                 "range": { "start": 0, "end": 10000 },
                 "transform": { "position": [0, 0], "scale": [1, 1] },
                 "z_order": 10
@@ -371,7 +420,7 @@ Canonical JSON for a scene that mixes all three workloads — a live compositor 
             }},
             { "leaf": {
                 "id": 102,
-                "kind": { "media": { "nested_scene": "ref:nle_seq_a" } },
+                "kind": { "media": { "file": { "path": "/assets/lower-third.png", "kind": "image" } } },
                 "range": { "start": 2000, "end": 8000 },
                 "z_order": 30
             }}
@@ -382,17 +431,13 @@ Canonical JSON for a scene that mixes all three workloads — a live compositor 
   "audio": [],
   "markers": [ { "id": 200, "at": 5000, "name": "goal", "kind": "cue" } ],
   "metadata": { "title": "match-7 live" },
-  "nested_scenes": {
-    "pdf_scene_001": { "canvas": { "vector": { } }, "axis": { "paged": { "count": 4 } } },
-    "nle_seq_a":    { "canvas": { "raster": { } }, "axis": { "range": { "start": 0, "end": 6000 } } }
-  },
   "op_log": [
     { "seq": 1, "at": 100, "op": { "add_animation": { "id": 101, "animation": { } } } }
   ]
 }
 ```
 
-Key design points for serde: `Axis` is tagged-enum; `ContainerKind` / `ObjectKind` / `SourceSpec` are tagged-enums; `Source` trait objects serialize via their underlying `SourceSpec` (which is `Clone + Serialize`); nested scenes are stored by-reference in a `nested_scenes` dictionary to avoid duplication and cycles; `op_log` is optional (only present for compositor replay + NLE undo history). A PDF scene serializes with `axis: { paged: {...} }`, empty `op_log`, and a page-per-container root — nothing else in the format is PDF-specific.
+Key design points for serde: `Axis` is tagged-enum; `ContainerKind` / `ObjectKind` / `SourceSpec` are tagged-enums; `Source` trait objects serialize via their underlying `SourceSpec` (which is `Clone + Serialize`); `op_log` is optional (only present for compositor replay + NLE undo history). A PDF scene serializes with `axis: { paged: {...} }`, empty `op_log`, and a `Page`-container per page as the roots under `Stage` — nothing else in the format is PDF-specific. A video-embedded-in-PDF is a plain `media.file` child of the owning `Page` container.
 
 ## Migration plan
 
@@ -423,13 +468,13 @@ Key design points for serde: `Axis` is tagged-enum; `ContainerKind` / `ObjectKin
 
 ## Open questions
 
-1. **Vector-canvas cross-referencing.** Should `NestedScene(Arc<Scene>)` inside a `Canvas::Raster` scene force rasterisation of the nested scene, or can vector content flow through to a final vector-capable exporter? (Compositor will always rasterise; PDF export of an NLE-embedded-in-PDF scene is the edge case.)
-2. **Axis for mixed-page-plus-time scenes.** A single PDF scene that embeds a video preview — is the outer axis `Paged(n)` and the inner nested scene `Range`, or do we need a 2D axis `PagedTime`? Current proposal: nested scene has its own axis.
-3. **`Source` trait object or generic?** `Arc<dyn Source>` is serde-unfriendly (we serialize via `SourceSpec`). Are we OK with the asymmetry between "runtime polymorphism via trait object" and "storage/wire via enum"?
-4. **`seed: u64` placement.** Should the seed live on `Scene` (global), on each effect (per-node), or both? Proposal assumes scene-global with per-`ObjectId` sub-streams derived via hash.
-5. **Paged animation.** Do keyframes in a PDF `Paged` scene mean anything, or are animations only valid on `Range`/`Unbounded` axes? Proposal: keyframes on a paged scene interpolate by page index (useful for animated PDFs in a print-export pipeline). Needs confirmation.
-6. **Transitions as first-class type?** A cross-fade is currently expressed as two overlapping `SceneObject`s with opacity animations. NLE UIs typically want a `Transition` primitive so ripple/roll edits preserve it. Proposal: add `ObjectKind::Transition { outgoing: ObjectId, incoming: ObjectId, kind: TransitionKind, duration: TimeStamp }` later, deferred to v0.2.
-7. **Op-log storage on `Scene`.** Should `op_log` live inside `Scene` (canonical for replay) or outside (passed alongside)? Proposal: optional field `op_log: Option<OpLog>`.
-8. **Back-pressure and frame deadlines.** `LiveDrive::frame_deadline` returns a `Duration` — but how does the renderer report missed deadlines upstream? Callback trait? Returned status on `advance_to_wallclock`? Needs interface detail.
-9. **Undo granularity.** NLE `OpLog` groups ops via `GroupBegin`/`GroupEnd`. Is a flat grouped-op-log enough, or do we need hierarchical undo (undo the group, then undo a specific op inside)?
-10. **`SourceSpec::File` resolution policy.** Is resolution `Source`-trait's job (object-level), or is there a scene-level `Assets` registry that resolves paths once (content-addressed)? Proposal: scene-level registry on `Scene::assets: Assets`.
+1. **Embedded-video playback semantics in a PDF.** An `ObjectKind::Media(Source::File { kind: Video })` living on a `Page` container — should the renderer auto-play on page-open, wait for a viewer trigger, or leave the decision to the exporter's PDF annotation builder? Proposal: Scene layer stores the reference + offset; PDF exporter emits a Media Clip annotation with `RunOnOpen = false` by default; viewer-triggered playback is the default.
+2. **`Source` trait object or generic?** `Arc<dyn Source>` is serde-unfriendly (we serialize via `SourceSpec`). Are we OK with the asymmetry between "runtime polymorphism via trait object" and "storage/wire via enum"?
+3. **`seed: u64` placement.** Should the seed live on `Scene` (global), on each effect (per-node), or both? Proposal assumes scene-global with per-`ObjectId` sub-streams derived via hash.
+4. **Paged animation.** Do keyframes in a PDF `Paged` scene mean anything? Given that no object survives between pages, the answer is almost certainly no — animations are per-object and objects live on one page, so the animation has a single page's worth of samples to apply. Proposal: animations on paged-axis scenes are silently ignored by the PDF exporter; keyframes still exist in the data model for consistency with time-based scenes but don't drive vector output.
+5. **Transitions as first-class type?** A cross-fade is currently expressed as two overlapping `SceneObject`s with opacity animations. NLE UIs typically want a `Transition` primitive so ripple/roll edits preserve it. Proposal: add `ObjectKind::Transition { outgoing: ObjectId, incoming: ObjectId, kind: TransitionKind, duration: TimeStamp }` later, deferred to v0.2. Program-level transitions (between whole scenes) live on the `Program` type directly and don't need this.
+6. **Op-log storage on `Scene`.** Should `op_log` live inside `Scene` (canonical for replay) or outside (passed alongside)? Proposal: optional field `op_log: Option<OpLog>`.
+7. **Back-pressure and frame deadlines.** `LiveDrive::frame_deadline` returns a `Duration` — but how does the renderer report missed deadlines upstream? Callback trait? Returned status on `advance_to_wallclock`? Needs interface detail.
+8. **Undo granularity.** NLE `OpLog` groups ops via `GroupBegin`/`GroupEnd`. Is a flat grouped-op-log enough, or do we need hierarchical undo (undo the group, then undo a specific op inside)?
+9. **`SourceSpec::File` resolution policy.** Is resolution `Source`-trait's job (object-level), or is there a scene-level `Assets` registry that resolves paths once (content-addressed)? Proposal: scene-level registry on `Scene::assets: Assets`.
+10. **Scene-as-video-source adapter.** The render-and-consume pattern that replaces nested scenes — should it be a helper in this crate (`SceneAsVideoSource` that wraps a `RasterRender` impl and presents as a `Source`)? Or a separate `oxideav-scene-adapters` crate? Proposal: ship it here as an opt-in module so users don't need a second dep for the common case.
