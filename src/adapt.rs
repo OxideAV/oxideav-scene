@@ -22,25 +22,36 @@
 //! go through a raster conversion step.
 
 use oxideav_core::{PixelFormat, Result, VideoFrame};
-use oxideav_pixfmt::ConvertOptions;
+use oxideav_pixfmt::{ConvertOptions, FrameInfo};
 
 use crate::object::Canvas;
 use crate::render::RenderedFrame;
 use crate::source::{SceneSource, SourceFormat};
 
 /// Convert `frame` to `target`. No-op when formats already match.
-pub fn adapt_frame_to(frame: VideoFrame, target: PixelFormat) -> Result<VideoFrame> {
-    if frame.format == target {
+///
+/// The slim [`VideoFrame`] no longer carries pixel format / dimensions, so
+/// the caller must pass a [`FrameInfo`] describing the source frame.
+pub fn adapt_frame_to(
+    frame: VideoFrame,
+    src_info: FrameInfo,
+    target: PixelFormat,
+) -> Result<VideoFrame> {
+    if src_info.format == target {
         return Ok(frame);
     }
-    oxideav_pixfmt::convert(&frame, target, &ConvertOptions::default())
+    oxideav_pixfmt::convert(&frame, src_info, target, &ConvertOptions::default())
 }
 
 /// Convert `frame` so it matches the canvas pixel format. For
 /// vector canvases (which don't rasterise) the frame passes through.
-pub fn adapt_frame_to_canvas(frame: VideoFrame, canvas: &Canvas) -> Result<VideoFrame> {
+pub fn adapt_frame_to_canvas(
+    frame: VideoFrame,
+    src_info: FrameInfo,
+    canvas: &Canvas,
+) -> Result<VideoFrame> {
     match canvas {
-        Canvas::Raster { pixel_format, .. } => adapt_frame_to(frame, *pixel_format),
+        Canvas::Raster { pixel_format, .. } => adapt_frame_to(frame, src_info, *pixel_format),
         Canvas::Vector { .. } => Ok(frame),
     }
 }
@@ -95,11 +106,24 @@ impl<S: SceneSource> SceneSource for AdaptedSource<S> {
     }
 
     fn pull(&mut self) -> Result<Option<RenderedFrame>> {
+        let inner_canvas = self.inner.format().canvas;
         let Some(mut frame) = self.inner.pull()? else {
             return Ok(None);
         };
         if let Some(video) = frame.video.take() {
-            frame.video = Some(adapt_frame_to(video, self.target)?);
+            // Read the source FrameInfo from the wrapped source's canvas.
+            // Vector canvases don't rasterise — pass through unchanged.
+            if let Canvas::Raster {
+                width,
+                height,
+                pixel_format,
+            } = inner_canvas
+            {
+                let info = FrameInfo::new(pixel_format, width, height);
+                frame.video = Some(adapt_frame_to(video, info, self.target)?);
+            } else {
+                frame.video = Some(video);
+            }
         }
         Ok(Some(frame))
     }
@@ -110,17 +134,13 @@ mod tests {
     use super::*;
     use crate::scene::Scene;
     use crate::source::SceneSource;
-    use oxideav_core::{Rational, TimeBase, VideoFrame, VideoPlane};
+    use oxideav_core::{Rational, VideoFrame, VideoPlane};
 
     fn yuv420p_frame(width: u32, height: u32) -> VideoFrame {
         let y_size = (width * height) as usize;
         let c_size = ((width / 2) * (height / 2)) as usize;
         VideoFrame {
-            format: PixelFormat::Yuv420P,
-            width,
-            height,
             pts: None,
-            time_base: TimeBase::new(1, 30),
             planes: vec![
                 VideoPlane {
                     stride: width as usize,
@@ -141,21 +161,22 @@ mod tests {
     #[test]
     fn adapt_to_same_format_is_identity() {
         let f = yuv420p_frame(8, 8);
-        let out = adapt_frame_to(f.clone(), PixelFormat::Yuv420P).unwrap();
-        assert_eq!(out.format, PixelFormat::Yuv420P);
+        let info = FrameInfo::new(PixelFormat::Yuv420P, 8, 8);
+        let out = adapt_frame_to(f.clone(), info, PixelFormat::Yuv420P).unwrap();
         assert_eq!(out.planes[0].data, f.planes[0].data);
     }
 
     #[test]
     fn adapt_to_canvas_vector_passes_through() {
         let f = yuv420p_frame(8, 8);
+        let info = FrameInfo::new(PixelFormat::Yuv420P, 8, 8);
         let canvas = Canvas::Vector {
             width: 595.0,
             height: 842.0,
             unit: crate::object::LengthUnit::Point,
         };
-        let out = adapt_frame_to_canvas(f, &canvas).unwrap();
-        assert_eq!(out.format, PixelFormat::Yuv420P);
+        let out = adapt_frame_to_canvas(f.clone(), info, &canvas).unwrap();
+        assert_eq!(out.planes[0].data, f.planes[0].data);
     }
 
     struct StaticSource {
@@ -200,18 +221,29 @@ mod tests {
     #[test]
     fn adapted_source_converts_on_pull() {
         // Yuv420P → Rgba is a supported pair in oxideav-pixfmt; the
-        // conversion just needs to produce a frame whose `format`
-        // field is now Rgba.
+        // adapter reads the source canvas's pixel format / dimensions
+        // off `inner.format()` (no longer carried per-frame).
         let scene = Scene::default();
+        let mut inner_fmt = SourceFormat::from_scene(&scene);
+        if let Canvas::Raster {
+            ref mut width,
+            ref mut height,
+            ref mut pixel_format,
+        } = inner_fmt.canvas
+        {
+            *width = 8;
+            *height = 8;
+            *pixel_format = PixelFormat::Yuv420P;
+        }
         let inner = StaticSource {
-            fmt: SourceFormat::from_scene(&scene),
+            fmt: inner_fmt,
             frames_left: 1,
         };
         let mut adapted = AdaptedSource::new(inner, PixelFormat::Rgba);
         let out = adapted.pull().unwrap().expect("frame");
         let video = out.video.unwrap();
-        assert_eq!(video.format, PixelFormat::Rgba);
-        assert_eq!(video.width, 8);
-        assert_eq!(video.height, 8);
+        // RGBA stride is width*4 = 32 for an 8-wide frame.
+        assert_eq!(video.planes[0].stride, 8 * 4);
+        assert_eq!(video.planes[0].data.len(), 8 * 8 * 4);
     }
 }
