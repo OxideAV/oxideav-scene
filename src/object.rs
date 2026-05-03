@@ -111,6 +111,15 @@ pub enum ObjectKind {
     Shape(Shape),
     Group(Vec<ObjectId>),
     Live(LiveStreamHandle),
+    /// Vector content — a self-contained
+    /// [`oxideav_core::VectorFrame`]. Renders natively to vector
+    /// outputs (PDF / SVG writers consume the `VectorFrame` as-is)
+    /// and rasterises through `oxideav_raster::Renderer` for
+    /// raster outputs (PNG / MP4 / RTMP); see
+    /// [`crate::raster::rasterize_vector`] for the helper. The
+    /// rasteriser also picks up `Group::cache_key` automatically
+    /// when the same sub-tree is re-rendered.
+    Vector(oxideav_core::VectorFrame),
 }
 
 /// Affine placement on the canvas. Applied in this order:

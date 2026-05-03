@@ -13,9 +13,18 @@ homepage = "https://github.com/OxideAV/oxideav-scene"
 keywords = ["multimedia", "scene", "compositor", "timeline", "pure-rust"]
 categories = ["multimedia::video"]
 
+[features]
+default = ["raster"]
+# `raster` pulls in oxideav-raster so scene callers can rasterise
+# `ObjectKind::Vector` payloads + `Page::content` for raster-target
+# writers (PNG / MP4 / RTMP). Disable when targeting only vector
+# outputs (PDF / SVG) to drop the rasteriser dep.
+raster = ["dep:oxideav-raster"]
+
 [dependencies]
 # 0.1.14 introduced VectorFrame + Group + the full vector primitive set
 # that `Page::content` and `ObjectKind::Vector` carry.
 oxideav-core = "0.1.14"
 oxideav-pixfmt = "0.1"
+oxideav-raster = { version = "0.1", optional = true }
 oxideav-scribe = "0.1"

@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SourceFormat::paged` — `true` when the source scene is in pages
   mode, so paged-content sinks can reject timeline scenes (and vice
   versa) early in `init()`.
+- `ObjectKind::Vector(oxideav_core::VectorFrame)` — vector content
+  as a first-class scene object. Renders natively to vector
+  outputs (PDF / SVG writers consume it as-is) and rasterises via
+  `oxideav_raster::Renderer` for raster targets.
+- `raster::rasterize_vector(frame, w, h) -> VideoFrame` helper +
+  default-on `raster` cargo feature pulling in `oxideav-raster`.
+  Disable the feature for vector-only consumers (PDF / SVG) so the
+  rasteriser doesn't get pulled in.
 
 ## [0.1.1](https://github.com/OxideAV/oxideav-scene/compare/v0.1.0...v0.1.1) - 2026-04-25
 

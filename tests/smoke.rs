@@ -129,6 +129,44 @@ fn stub_renderer_surfaces_unsupported() {
 }
 
 #[test]
+fn build_a_scene_with_vector_object() {
+    use oxideav_core::{Group, TimeBase, VectorFrame};
+    let vf = VectorFrame {
+        width: 100.0,
+        height: 100.0,
+        view_box: None,
+        root: Group::default(),
+        pts: None,
+        time_base: TimeBase::new(1, 1),
+    };
+    let mut scene = Scene::default();
+    scene.objects.push(SceneObject {
+        id: ObjectId::new(42),
+        kind: ObjectKind::Vector(vf),
+        ..SceneObject::default()
+    });
+    assert_eq!(scene.objects.len(), 1);
+    assert!(matches!(scene.objects[0].kind, ObjectKind::Vector(_)));
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn rasterize_vector_object_smoke() {
+    use oxideav_core::{Group, TimeBase, VectorFrame};
+    let vf = VectorFrame {
+        width: 32.0,
+        height: 16.0,
+        view_box: None,
+        root: Group::default(),
+        pts: None,
+        time_base: TimeBase::new(1, 1),
+    };
+    let frame = oxideav_scene::rasterize_vector(&vf, 32, 16);
+    assert!(!frame.planes.is_empty());
+    assert_eq!(frame.planes[0].data.len(), 32 * 16 * 4);
+}
+
+#[test]
 fn build_a_paged_pdf_scene() {
     // A4 cover, then two US Letter body pages — varied page sizes
     // are the whole point of the pages-mode model.
