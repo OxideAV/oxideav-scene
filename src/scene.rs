@@ -134,7 +134,7 @@ impl Scene {
     /// Whether the scene is in pages mode. See the [`Scene`] doc
     /// comment for the contract.
     pub fn is_paged(&self) -> bool {
-        self.pages.as_ref().map_or(false, |p| !p.is_empty())
+        self.pages.as_ref().is_some_and(|p| !p.is_empty())
     }
 
     /// Adapt a paged scene to a timeline by allotting
