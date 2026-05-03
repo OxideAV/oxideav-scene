@@ -53,6 +53,7 @@ pub mod duration;
 pub mod id;
 pub mod object;
 pub mod ops;
+pub mod page;
 pub mod render;
 pub mod scene;
 pub mod source;
@@ -68,6 +69,7 @@ pub use object::{
     SceneObject, Shape, TextRun, Transform, VideoSource,
 };
 pub use ops::{ExportOp, Operation};
+pub use page::Page;
 pub use render::{RenderedFrame, SceneRenderer, SceneSampler, StubRenderer};
 pub use scene::{Background, Metadata, Scene};
 pub use source::{drive, FnSink, NullSink, RenderedSource, SceneSink, SceneSource, SourceFormat};

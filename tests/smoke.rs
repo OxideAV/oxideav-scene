@@ -3,7 +3,7 @@
 
 use oxideav_scene::{
     AnimatedProperty, Animation, Canvas, Easing, ExportOp, ImageSource, Keyframe, KeyframeValue,
-    LengthUnit, Lifetime, ObjectId, ObjectKind, Operation, Repeat, Scene, SceneDuration,
+    LengthUnit, Lifetime, ObjectId, ObjectKind, Operation, Page, Repeat, Scene, SceneDuration,
     SceneObject, SceneRenderer, StubRenderer, Transform,
 };
 
@@ -126,4 +126,27 @@ fn stub_renderer_surfaces_unsupported() {
     let mut r = StubRenderer;
     let scene = Scene::default();
     assert!(r.prepare(&scene).is_err());
+}
+
+#[test]
+fn build_a_paged_pdf_scene() {
+    // A4 cover, then two US Letter body pages — varied page sizes
+    // are the whole point of the pages-mode model.
+    let scene = Scene {
+        canvas: Canvas::Vector {
+            width: 595.0,
+            height: 842.0,
+            unit: LengthUnit::Point,
+        },
+        pages: Some(vec![
+            Page::new(595.0, 842.0),
+            Page::new(612.0, 792.0),
+            Page::new(612.0, 792.0),
+        ]),
+        ..Scene::default()
+    };
+    assert!(scene.is_paged());
+    assert_eq!(scene.pages.as_ref().unwrap().len(), 3);
+    let tl = scene.pages_to_timeline(2_000);
+    assert_eq!(tl, vec![(0, 0), (1, 2_000), (2, 4_000)]);
 }

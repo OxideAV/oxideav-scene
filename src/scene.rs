@@ -7,8 +7,28 @@ use oxideav_core::{Rational, TimeBase};
 use crate::audio::AudioCue;
 use crate::duration::{SceneDuration, TimeStamp};
 use crate::object::{Canvas, SceneObject};
+use crate::page::Page;
 
 /// Top-level scene — a canvas + a timeline of objects and audio cues.
+///
+/// A scene operates in one of two modes, mutually exclusive at
+/// render-dispatch time:
+///
+/// 1. **Timeline mode** (`pages == None`): the existing model.
+///    [`duration`](Self::duration) bounds the timeline, the renderer
+///    samples objects at [`framerate`](Self::framerate). Used by the
+///    streaming compositor (PNG / MP4 / RTMP), the NLE timeline, and
+///    every raster-target writer.
+/// 2. **Pages mode** (`pages == Some(_)`): the scene is a sequence
+///    of [`Page`]s. Each page is independently sized + carries its
+///    own [`oxideav_core::VectorFrame`]. Used by paged-content
+///    writers (PDF, multi-page TIFF, EPUB). [`duration`](Self::duration)
+///    + [`framerate`](Self::framerate) are ignored in this mode.
+///
+/// The two are NOT additive — a paged writer rejects a scene with
+/// `pages == None`, and a video writer rejects one with
+/// `pages == Some(_)`. Use [`Scene::pages_to_timeline`] /
+/// [`Scene::timeline_to_pages`] to bridge across the modes.
 #[derive(Clone, Debug)]
 pub struct Scene {
     pub canvas: Canvas,
@@ -33,6 +53,11 @@ pub struct Scene {
     pub objects: Vec<SceneObject>,
     pub audio: Vec<AudioCue>,
     pub metadata: Metadata,
+    /// Paged-content sequence. `Some(...)` puts the scene into pages
+    /// mode (PDF / multi-page TIFF / EPUB writers); `None` keeps it
+    /// in timeline mode (the default). See [`Scene`] for the
+    /// dispatch contract.
+    pub pages: Option<Vec<Page>>,
 }
 
 impl Default for Scene {
@@ -47,6 +72,7 @@ impl Default for Scene {
             objects: Vec::new(),
             audio: Vec::new(),
             metadata: Metadata::default(),
+            pages: None,
         }
     }
 }
@@ -103,6 +129,65 @@ impl Scene {
             .collect();
         refs.sort_by_key(|o| o.z_order);
         refs
+    }
+
+    /// Whether the scene is in pages mode. See the [`Scene`] doc
+    /// comment for the contract.
+    pub fn is_paged(&self) -> bool {
+        self.pages.as_ref().map_or(false, |p| !p.is_empty())
+    }
+
+    /// Adapt a paged scene to a timeline by allotting
+    /// `per_page_duration_ms` to each page sequentially. Returns a
+    /// list of `(page_index, lifetime)` tuples — one per page —
+    /// suitable for driving a video writer that needs a
+    /// monotonically-advancing PTS axis.
+    ///
+    /// The returned timestamps are in the scene's `time_base`
+    /// units. `per_page_duration_ms` is in milliseconds; the
+    /// converter scales it via `time_base` so callers don't need to
+    /// pre-convert.
+    ///
+    /// Returns an empty `Vec` when the scene is not in pages mode.
+    pub fn pages_to_timeline(&self, per_page_duration_ms: u64) -> Vec<(usize, TimeStamp)> {
+        let Some(ref pages) = self.pages else {
+            return Vec::new();
+        };
+        // Convert ms → time_base ticks. time_base is num/den
+        // seconds-per-tick; ticks per ms = den / (num * 1000).
+        let tb = self.time_base.0;
+        let num = (per_page_duration_ms as i128) * (tb.den as i128);
+        let den = (tb.num as i128) * 1000;
+        let ticks_per_page: TimeStamp = if den == 0 {
+            0
+        } else {
+            (num / den) as TimeStamp
+        };
+        let mut out = Vec::with_capacity(pages.len());
+        let mut t: TimeStamp = 0;
+        for (i, _) in pages.iter().enumerate() {
+            out.push((i, t));
+            t = t.saturating_add(ticks_per_page);
+        }
+        out
+    }
+
+    /// Adapt a timeline-mode scene to discrete page-out points.
+    /// Returns a `Vec<TimeStamp>` echoing `at_pts` filtered to
+    /// in-range timestamps; the consumer renders one page per
+    /// timestamp by sampling the scene at that PTS. Useful for
+    /// "PDF preview every N seconds" workflows.
+    ///
+    /// Out-of-range PTS values (negative, or past the scene's end
+    /// for finite scenes) are dropped — the renderer would refuse
+    /// them anyway. Returns the input unchanged for indefinite
+    /// scenes (modulo the `t >= 0` filter).
+    pub fn timeline_to_pages(&self, at_pts: &[TimeStamp]) -> Vec<TimeStamp> {
+        at_pts
+            .iter()
+            .copied()
+            .filter(|&t| self.duration.contains(t))
+            .collect()
     }
 }
 
@@ -241,6 +326,87 @@ mod tests {
             ..Scene::default()
         };
         assert_eq!(scene.frame_count(), None);
+    }
+
+    #[test]
+    fn default_scene_is_timeline_mode() {
+        let s = Scene::default();
+        assert!(!s.is_paged());
+        assert!(s.pages.is_none());
+    }
+
+    #[test]
+    fn scene_in_pages_mode_reports_paged() {
+        let s = Scene {
+            pages: Some(vec![Page::new(595.0, 842.0), Page::new(842.0, 595.0)]),
+            ..Scene::default()
+        };
+        assert!(s.is_paged());
+        assert_eq!(s.pages.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn empty_pages_vec_is_not_paged() {
+        let s = Scene {
+            pages: Some(Vec::new()),
+            ..Scene::default()
+        };
+        assert!(!s.is_paged());
+    }
+
+    #[test]
+    fn pages_to_timeline_advances_per_page() {
+        // 3 pages, 100 ms each, 1/1000 tb → ticks = 100 each.
+        let s = Scene {
+            pages: Some(vec![
+                Page::new(595.0, 842.0),
+                Page::new(595.0, 842.0),
+                Page::new(595.0, 842.0),
+            ]),
+            ..Scene::default()
+        };
+        let tl = s.pages_to_timeline(100);
+        assert_eq!(tl, vec![(0, 0), (1, 100), (2, 200)]);
+    }
+
+    #[test]
+    fn pages_to_timeline_empty_for_timeline_scene() {
+        let s = Scene::default();
+        assert!(s.pages_to_timeline(100).is_empty());
+    }
+
+    #[test]
+    fn pages_to_timeline_scales_for_90khz_tb() {
+        // 1/90000 tb → 1 ms = 90 ticks; 100 ms = 9000 ticks.
+        let s = Scene {
+            time_base: TimeBase::new(1, 90_000),
+            pages: Some(vec![Page::new(100.0, 100.0); 2]),
+            ..Scene::default()
+        };
+        let tl = s.pages_to_timeline(100);
+        assert_eq!(tl, vec![(0, 0), (1, 9_000)]);
+    }
+
+    #[test]
+    fn timeline_to_pages_filters_out_of_range() {
+        let s = Scene {
+            duration: SceneDuration::Finite(1000),
+            ..Scene::default()
+        };
+        let pts = vec![-1, 0, 500, 999, 1000, 5000];
+        let kept = s.timeline_to_pages(&pts);
+        assert_eq!(kept, vec![0, 500, 999]);
+    }
+
+    #[test]
+    fn timeline_to_pages_indefinite_keeps_nonneg() {
+        let s = Scene {
+            duration: SceneDuration::Indefinite,
+            ..Scene::default()
+        };
+        let pts = vec![-1, 0, i64::MAX];
+        let kept = s.timeline_to_pages(&pts);
+        assert_eq!(kept, vec![0, i64::MAX]);
     }
 
     #[test]

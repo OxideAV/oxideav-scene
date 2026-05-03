@@ -37,6 +37,11 @@ pub struct SourceFormat {
     /// size output containers; `Indefinite` signals a streaming
     /// source that runs until externally stopped.
     pub duration: SceneDuration,
+    /// Pages-mode flag — `true` when the source scene carries a
+    /// non-empty [`Scene::pages`] list. Lets paged-content sinks
+    /// (PDF, multi-page TIFF) reject timeline scenes early in
+    /// `init()`, and lets video sinks reject paged scenes.
+    pub paged: bool,
 }
 
 impl SourceFormat {
@@ -50,6 +55,7 @@ impl SourceFormat {
             time_base: scene.time_base,
             sample_rate: scene.sample_rate,
             duration: scene.duration,
+            paged: scene.is_paged(),
         }
     }
 }

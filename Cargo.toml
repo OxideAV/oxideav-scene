@@ -14,6 +14,8 @@ keywords = ["multimedia", "scene", "compositor", "timeline", "pure-rust"]
 categories = ["multimedia::video"]
 
 [dependencies]
-oxideav-core = "0.1"
+# 0.1.14 introduced VectorFrame + Group + the full vector primitive set
+# that `Page::content` and `ObjectKind::Vector` carry.
+oxideav-core = "0.1.14"
 oxideav-pixfmt = "0.1"
 oxideav-scribe = "0.1"

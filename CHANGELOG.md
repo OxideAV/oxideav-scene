@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `custom: BTreeMap<String, String>` for per-format extras (PDF
   `/Info` custom keys, Matroska `ContentTrack` tags, RDF properties,
   mp4 `udta` items, etc).
+- `page::Page` — a single page in a paged-content scene. Carries
+  per-page `width / height`, an `oxideav_core::VectorFrame` payload,
+  an optional human-readable `label` (PDF `/Info` page labels), and
+  a `0/90/180/270` `orientation`.
+- `Scene::pages: Option<Vec<Page>>` — additive sibling of `duration`.
+  `Some(...)` puts the scene into pages mode (PDF / multi-page TIFF
+  writers); `None` keeps it in timeline mode (PNG / MP4 / RTMP
+  writers, the existing default).
+- `Scene::is_paged`, `Scene::pages_to_timeline`,
+  `Scene::timeline_to_pages` — adapters between the two modes.
+- `SourceFormat::paged` — `true` when the source scene is in pages
+  mode, so paged-content sinks can reject timeline scenes (and vice
+  versa) early in `init()`.
 
 ## [0.1.1](https://github.com/OxideAV/oxideav-scene/compare/v0.1.0...v0.1.1) - 2026-04-25
 
