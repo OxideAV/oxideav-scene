@@ -17,21 +17,3 @@ categories = ["multimedia::video"]
 oxideav-core = "0.1"
 oxideav-pixfmt = "0.1"
 oxideav-scribe = "0.0"
-
-# TEMP-LOCAL: empty [workspace] table + [patch.crates-io] path
-# overrides so `cargo test -p oxideav-scene` (or in-crate `cargo test`)
-# doesn't walk up into the umbrella workspace, which currently errors
-# with "multiple workspace roots" because several sibling crates
-# (oxideav-dts, oxideav-indeo, oxideav-musepack, oxideav-scribe,
-# oxideav-subtitle, oxideav-vp8) carry their own [workspace] block.
-# Mirrors the reference template `oxideav-subtitle` — see
-# memory/feedback_no_nested_workspace.md for the cleanup direction:
-# this block should come out once the umbrella is repaired AND
-# oxideav-scribe ships a published 0.0.x to crates.io.
-[workspace]
-
-[patch.crates-io]
-oxideav-core = { path = "../oxideav-core" }
-oxideav-pixfmt = { path = "../oxideav-pixfmt" }
-oxideav-scribe = { path = "../oxideav-scribe" }
-oxideav-ttf = { path = "../oxideav-ttf" }
