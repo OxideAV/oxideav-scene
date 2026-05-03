@@ -1,9 +1,18 @@
 //! A time-based composition model for oxideav.
 //!
-//! This crate is a **scaffold**. The type surface is in place; the
-//! renderer is a stub. See [`README.md`](../README.md) for the full
-//! design + the three target use cases (PDF pages, RTMP streaming
-//! compositor, NLE timeline).
+//! The type surface (scene, objects, animations, time-base) is in
+//! place. The full [`SceneRenderer`] driver is still a stub
+//! ([`StubRenderer`] returns `Error::Unsupported`); concrete
+//! per-object rendering lands here piecemeal. The first real piece
+//! is [`text::TextRenderer`] — it composites a [`TextRun`] onto a
+//! straight-alpha RGBA framebuffer via [`oxideav_scribe`] (TrueType
+//! shaping + scanline rasterisation). The caller supplies the
+//! [`oxideav_scribe::Face`]; scene-level font discovery is out of
+//! scope.
+//!
+//! See [`README.md`](../README.md) for the full design + the three
+//! target use cases (PDF pages, RTMP streaming compositor, NLE
+//! timeline).
 //!
 //! # Quick tour
 //!
@@ -47,6 +56,7 @@ pub mod ops;
 pub mod render;
 pub mod scene;
 pub mod source;
+pub mod text;
 
 pub use adapt::{adapt_frame_to, adapt_frame_to_canvas, AdaptedSource};
 pub use animation::{AnimatedProperty, Animation, Easing, Keyframe, KeyframeValue, Repeat};
@@ -61,3 +71,4 @@ pub use ops::{ExportOp, Operation};
 pub use render::{RenderedFrame, SceneRenderer, SceneSampler, StubRenderer};
 pub use scene::{Background, Metadata, Scene};
 pub use source::{drive, FnSink, NullSink, RenderedSource, SceneSink, SceneSource, SourceFormat};
+pub use text::TextRenderer;
