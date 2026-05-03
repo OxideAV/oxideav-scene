@@ -1,5 +1,7 @@
 //! Root scene type.
 
+use std::collections::BTreeMap;
+
 use oxideav_core::{Rational, TimeBase};
 
 use crate::audio::AudioCue;
@@ -133,17 +135,42 @@ impl Default for Background {
 
 /// Scene-level metadata. Carried through to exports when the target
 /// format supports it (PDF document info dict, MP4 `meta` box, etc).
+///
+/// `producer` and `creator` are intentionally distinct, mirroring
+/// PDF's `/Info` dictionary:
+///
+/// - `creator` — the tool that authored the **source** content (e.g.
+///   the NLE, drawing app, or word processor the user worked in).
+/// - `producer` — the tool that wrote the **output** file (this
+///   crate / oxideav exporter).
 #[derive(Clone, Debug, Default)]
 pub struct Metadata {
     pub title: Option<String>,
     pub author: Option<String>,
     pub subject: Option<String>,
     pub keywords: Vec<String>,
-    /// Producing tool name.
+    /// Authoring application — the tool used to create the source
+    /// content. Distinct from [`producer`](Self::producer); PDF's
+    /// `/Info` dictionary has separate `/Creator` and `/Producer`
+    /// keys for the same reason.
+    pub creator: Option<String>,
+    /// Producing tool name — the writer that emitted the output
+    /// file.
     pub producer: Option<String>,
     /// ISO-8601 string; not parsed here so exporters can pass it
     /// through unchanged.
     pub created_at: Option<String>,
+    /// ISO-8601 modification timestamp. Mirrors `created_at`; PDF
+    /// `/Info` has both `/CreationDate` and `/ModDate`, mp4 `mvhd`
+    /// has both creation_time and modification_time, etc.
+    pub modified_at: Option<String>,
+    /// Extensible per-format extras. Lets callers carry metadata
+    /// the standard fields don't cover: PDF `/Info` custom keys,
+    /// Matroska `ContentTrack` tags, RDF properties, mp4 `udta`
+    /// items not covered by the standard fields, ID3 frames, and
+    /// so on. Keys are case-sensitive; uniqueness is the caller's
+    /// responsibility (the map enforces it).
+    pub custom: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -214,6 +241,35 @@ mod tests {
             ..Scene::default()
         };
         assert_eq!(scene.frame_count(), None);
+    }
+
+    #[test]
+    fn metadata_default_is_empty() {
+        let m = Metadata::default();
+        assert!(m.title.is_none());
+        assert!(m.creator.is_none());
+        assert!(m.producer.is_none());
+        assert!(m.created_at.is_none());
+        assert!(m.modified_at.is_none());
+        assert!(m.custom.is_empty());
+    }
+
+    #[test]
+    fn metadata_custom_carries_extras() {
+        let mut m = Metadata {
+            creator: Some("MyDrawingApp 4.2".into()),
+            producer: Some("oxideav-pdf 0.1".into()),
+            modified_at: Some("2026-05-04T12:00:00Z".into()),
+            ..Metadata::default()
+        };
+        m.custom
+            .insert("dc:rights".into(), "(c) 2026 Karpeles Lab Inc.".into());
+        m.custom.insert("Trapped".into(), "False".into());
+        assert_eq!(m.creator.as_deref(), Some("MyDrawingApp 4.2"));
+        assert_eq!(m.producer.as_deref(), Some("oxideav-pdf 0.1"));
+        assert_eq!(m.modified_at.as_deref(), Some("2026-05-04T12:00:00Z"));
+        assert_eq!(m.custom.get("Trapped").map(String::as_str), Some("False"));
+        assert_eq!(m.custom.len(), 2);
     }
 
     #[test]

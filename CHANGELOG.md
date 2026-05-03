@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Metadata`: `creator` (authoring tool, distinct from `producer` =
+  output writer — mirrors PDF `/Info`'s `/Creator` vs `/Producer`),
+  `modified_at` (ISO-8601, mirrors `created_at`), and
+  `custom: BTreeMap<String, String>` for per-format extras (PDF
+  `/Info` custom keys, Matroska `ContentTrack` tags, RDF properties,
+  mp4 `udta` items, etc).
+
 ## [0.1.1](https://github.com/OxideAV/oxideav-scene/compare/v0.1.0...v0.1.1) - 2026-04-25
 
 ### Other
