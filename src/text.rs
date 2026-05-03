@@ -128,7 +128,9 @@ impl TextRenderer {
         if bm.is_empty() {
             return Ok(());
         }
-        blit_rgba_straight(dst, dst_w, dst_h, pen_x, pen_y, &bm.data, bm.width, bm.height);
+        blit_rgba_straight(
+            dst, dst_w, dst_h, pen_x, pen_y, &bm.data, bm.width, bm.height,
+        );
         // round-3 note: `run.underline` should drive a 1..2 px filled
         // rectangle at `pen_y + ascent + 1` spanning `bm.width`. The
         // Y-position needs the face's underline metric (post.underlinePosition
@@ -149,13 +151,8 @@ impl TextRenderer {
     ) -> Result<Vec<RgbaBitmap>, oxideav_scribe::Error> {
         let size = sane_size(run.font_size);
         let color = decode_rgba(run.color);
-        let bms = oxideav_scribe::render_text_wrapped(
-            &self.face,
-            &run.text,
-            size,
-            color,
-            max_width_px,
-        )?;
+        let bms =
+            oxideav_scribe::render_text_wrapped(&self.face, &run.text, size, color, max_width_px)?;
         if run.italic {
             return Ok(bms
                 .into_iter()
@@ -419,11 +416,15 @@ mod tests {
         let mut dst = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
 
         // Pen at (5, 5) — leaves room above/below for descenders.
-        tr.render_run_into(&run, &mut dst, dst_w, dst_h, 5, 5).unwrap();
+        tr.render_run_into(&run, &mut dst, dst_w, dst_h, 5, 5)
+            .unwrap();
 
         // 1. Total lit pixel count is non-trivial.
         let lit = dst.chunks_exact(4).filter(|p| p[3] > 0).count();
-        assert!(lit > 50, "expected glyph coverage; got only {lit} lit pixels");
+        assert!(
+            lit > 50,
+            "expected glyph coverage; got only {lit} lit pixels"
+        );
 
         // 2. Some lit pixel sits within the run's pen region —
         //    i.e. roughly in the upper-left quadrant where the

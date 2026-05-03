@@ -61,7 +61,8 @@ fn scene_text_object_rasterises_end_to_end() {
     let mut dst = vec![0u8; (dst_w as usize) * (dst_h as usize) * 4];
 
     let mut tr = TextRenderer::new(face);
-    tr.render_run_into(run, &mut dst, dst_w, dst_h, 5, 5).unwrap();
+    tr.render_run_into(run, &mut dst, dst_w, dst_h, 5, 5)
+        .unwrap();
 
     // Total lit pixel count is non-trivial.
     let lit = dst.chunks_exact(4).filter(|p| p[3] > 0).count();
