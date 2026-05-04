@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `text::TextRenderer`: migrated from the (now-removed)
+  `oxideav-scribe` pixel pipeline (`Composer` / `render_text` /
+  `render_text_wrapped` / `RgbaBitmap` re-export, dropped in scribe
+  0.1.5 / #354) to the vector path. Internally the renderer now wraps
+  the face in a `FaceChain`, calls `Shaper::shape_to_paths` to produce
+  positioned glyph nodes, recolours the default-black `PathNode.fill`
+  to the run's colour, and rasterises through `oxideav_raster::Renderer`
+  with the glyph-cache `Group::cache_key` envelope intact (so the same
+  glyph at the same size hits the bitmap cache across runs).
+- `RgbaBitmap`: now defined locally in `oxideav_scene::text` (mirrors
+  the former `oxideav_scribe::RgbaBitmap` byte-layout — same `width`,
+  `height`, packed-RGBA8 `data`). The `TextRenderer` public API
+  (`render_run`, `render_run_into`, `render_run_wrapped`,
+  `render_run_wrapped_into`, `compose_run_at`) is byte-stable.
+- `oxideav-raster` is now a hard dependency (was previously gated
+  behind the `raster` cargo feature). The `raster` feature is
+  preserved as a no-op for back-compat. `TextRenderer` requires the
+  vector→pixel pipeline to function, so vector-only consumers can no
+  longer drop the rasteriser dep by disabling the feature; that's a
+  follow-up for a future round if anyone needs it.
+
 ## [0.1.2](https://github.com/OxideAV/oxideav-scene/compare/v0.1.1...v0.1.2) - 2026-05-03
 
 ### Fixed
@@ -26,36 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - migrate to centralized OxideAV/.github reusable workflows
 - adopt slim VideoFrame shape
 - pin release-plz to patch-only bumps
-
-### Added
-
-- `Metadata`: `creator` (authoring tool, distinct from `producer` =
-  output writer — mirrors PDF `/Info`'s `/Creator` vs `/Producer`),
-  `modified_at` (ISO-8601, mirrors `created_at`), and
-  `custom: BTreeMap<String, String>` for per-format extras (PDF
-  `/Info` custom keys, Matroska `ContentTrack` tags, RDF properties,
-  mp4 `udta` items, etc).
-- `page::Page` — a single page in a paged-content scene. Carries
-  per-page `width / height`, an `oxideav_core::VectorFrame` payload,
-  an optional human-readable `label` (PDF `/Info` page labels), and
-  a `0/90/180/270` `orientation`.
-- `Scene::pages: Option<Vec<Page>>` — additive sibling of `duration`.
-  `Some(...)` puts the scene into pages mode (PDF / multi-page TIFF
-  writers); `None` keeps it in timeline mode (PNG / MP4 / RTMP
-  writers, the existing default).
-- `Scene::is_paged`, `Scene::pages_to_timeline`,
-  `Scene::timeline_to_pages` — adapters between the two modes.
-- `SourceFormat::paged` — `true` when the source scene is in pages
-  mode, so paged-content sinks can reject timeline scenes (and vice
-  versa) early in `init()`.
-- `ObjectKind::Vector(oxideav_core::VectorFrame)` — vector content
-  as a first-class scene object. Renders natively to vector
-  outputs (PDF / SVG writers consume it as-is) and rasterises via
-  `oxideav_raster::Renderer` for raster targets.
-- `raster::rasterize_vector(frame, w, h) -> VideoFrame` helper +
-  default-on `raster` cargo feature pulling in `oxideav-raster`.
-  Disable the feature for vector-only consumers (PDF / SVG) so the
-  rasteriser doesn't get pulled in.
 
 ## [0.1.1](https://github.com/OxideAV/oxideav-scene/compare/v0.1.0...v0.1.1) - 2026-04-25
 

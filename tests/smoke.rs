@@ -149,7 +149,6 @@ fn build_a_scene_with_vector_object() {
     assert!(matches!(scene.objects[0].kind, ObjectKind::Vector(_)));
 }
 
-#[cfg(feature = "raster")]
 #[test]
 fn rasterize_vector_object_smoke() {
     use oxideav_core::{Group, TimeBase, VectorFrame};
