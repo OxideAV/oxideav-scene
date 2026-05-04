@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/OxideAV/oxideav-scene/compare/v0.1.1...v0.1.2) - 2026-05-03
+
+### Fixed
+
+- *(clippy)* use is_some_and over map_or with false default
+
+### Other
+
+- ObjectKind::Vector + raster fallback ([#350](https://github.com/OxideAV/oxideav-scene/pull/350))
+- pages-mode timing model (Page + Scene::pages)
+- extend Metadata with creator/modified_at/custom
+- bump oxideav-scribe pin to 0.1
+- replace never-match regex with semver_check = false
+- cargo fmt: fix rustfmt --check CI gate
+- drop nested [workspace] + [patch.crates-io] (umbrella sweep)
+- real Scribe-backed TextRun renderer (replaces scaffold)
+- migrate to centralized OxideAV/.github reusable workflows
+- adopt slim VideoFrame shape
+- pin release-plz to patch-only bumps
+
 ### Added
 
 - `Metadata`: `creator` (authoring tool, distinct from `producer` =
