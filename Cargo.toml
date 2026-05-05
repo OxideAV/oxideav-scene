@@ -27,7 +27,7 @@ raster = []
 [dependencies]
 # 0.1.14 introduced VectorFrame + Group + the full vector primitive set
 # that `Page::content` and `ObjectKind::Vector` carry.
-oxideav-core = "0.1.14"
+oxideav-core = "0.1"
 oxideav-pixfmt = "0.1"
 # `oxideav-raster` is now hard-required: `TextRenderer` (in `text.rs`,
 # always compiled) shapes glyph runs through `oxideav-scribe`'s vector
