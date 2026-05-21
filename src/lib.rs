@@ -54,6 +54,7 @@ pub mod id;
 pub mod object;
 pub mod ops;
 pub mod page;
+pub mod paint;
 // `raster` was previously gated behind the `raster` cargo feature; with
 // the round-2 text-pipeline migration `oxideav-raster` is a hard
 // dependency (text rendering goes through it), so the gate is dropped
@@ -76,6 +77,7 @@ pub use object::{
 };
 pub use ops::{ExportOp, Operation};
 pub use page::Page;
+pub use paint::{Gradient, Paint, Stop};
 pub use raster::rasterize_vector;
 pub use render::{RenderedFrame, SceneRenderer, SceneSampler, StubRenderer};
 pub use scene::{Background, Metadata, Scene};

@@ -33,6 +33,22 @@ rendering, encoding, or file-format I/O yet — those land as follow-ups.
   `Keyframe`, `Easing`, `AudioCue` types are in place.
 - `SceneRenderer` + `SceneSampler` traits are defined but return
   `Error::Unsupported` on every call.
+- `Paint` + `Gradient` typed paint patterns (multi-stop linear /
+  radial) land in [`paint`], with `Background::Gradient(_)` exposing
+  them as a richer alternative to the legacy two-colour
+  `Background::LinearGradient { from, to, angle_deg }`.
+- `Scene::apply(op)` / `Scene::apply_batch(ops)` drive the
+  [`Operation`] DSL in-process: add/remove objects, set transforms,
+  animate / cancel, fire audio cues. Receipts go to the caller for
+  logging.
+- `Scene::merge(other, time_offset, z_offset)` splices an entire
+  other scene onto this one — appends + shifts lifetimes and
+  keyframe times, offsets z-order, extends `SceneDuration::Finite` if
+  needed. NLE-style "compose track then append" lands cleanly.
+- `Scene::next_object_id()` allocates a collision-free
+  monotonically-increasing object id; pair with
+  `Operation::AddObject` to keep the streaming-compositor wire
+  format short.
 - No `oxideav-codec` or container integration yet — that comes after
   the render pipeline is real.
 
@@ -332,7 +348,8 @@ src/
 ├── adapt.rs         — pixel-format adaptation (inbound + outbound, via oxideav-pixfmt)
 ├── duration.rs      — SceneDuration + Lifetime
 ├── id.rs            — ObjectId (stable, editable)
-└── ops.rs           — Operation enum for the streaming compositor
+├── ops.rs           — Operation enum for the streaming compositor
+└── paint.rs         — Paint + Gradient (multi-stop linear / radial)
 ```
 
 Everything is `pub` and `#[non_exhaustive]` on public enums so new

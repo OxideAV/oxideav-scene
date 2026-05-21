@@ -5,9 +5,12 @@ use std::collections::BTreeMap;
 use oxideav_core::{Rational, TimeBase};
 
 use crate::audio::AudioCue;
-use crate::duration::{SceneDuration, TimeStamp};
+use crate::duration::{Lifetime, SceneDuration, TimeStamp};
+use crate::id::ObjectId;
 use crate::object::{Canvas, SceneObject};
+use crate::ops::Operation;
 use crate::page::Page;
+use crate::paint::Gradient;
 
 /// Top-level scene — a canvas + a timeline of objects and audio cues.
 ///
@@ -172,6 +175,206 @@ impl Scene {
         out
     }
 
+    /// Apply one [`Operation`] to the scene. Returns a short
+    /// human-readable receipt describing what happened — useful for
+    /// streaming-compositor logs and for tests asserting on the
+    /// effect of a control-plane message.
+    ///
+    /// The semantics:
+    ///
+    /// - [`Operation::AddObject`] — appends the object and re-sorts
+    ///   by z-order. Returns `"add obj#N"`.
+    /// - [`Operation::RemoveObject`] — removes the object with the
+    ///   given id. `at` is informational here: the in-process driver
+    ///   removes immediately; a future scheduling layer can read `at`
+    ///   off the [`Operation::RemoveObject`] variant to defer.
+    /// - [`Operation::SetTransform`] — overwrites the base transform.
+    ///   Animations on the same object continue to add to this base.
+    /// - [`Operation::Animate`] — appends the animation; no
+    ///   replacement of existing tracks on the same property (use
+    ///   [`Operation::CancelAnimation`] first).
+    /// - [`Operation::CancelAnimation`] — removes the *first*
+    ///   animation matching the property.
+    /// - [`Operation::FireAudio`] — appends the cue to the scene's
+    ///   audio bus.
+    /// - [`Operation::EndScene`] — switches a streaming scene to
+    ///   `SceneDuration::Finite(now)`. The caller passes the current
+    ///   scene-time clock via a future signature once a clock source
+    ///   exists; for now the receipt notes that the operation was
+    ///   recorded but the duration stays unchanged.
+    ///
+    /// Returns `Err(&'static str)` only when the operation targets a
+    /// non-existent object id (Remove / SetTransform / Animate /
+    /// CancelAnimation); all other operations succeed unconditionally.
+    pub fn apply(&mut self, op: Operation) -> Result<String, &'static str> {
+        match op {
+            Operation::AddObject(obj) => {
+                let id = obj.id;
+                self.objects.push(*obj);
+                self.sort_by_z_order();
+                Ok(format!("add {id}"))
+            }
+            Operation::RemoveObject { id, at: _ } => {
+                let before = self.objects.len();
+                self.objects.retain(|o| o.id != id);
+                if self.objects.len() == before {
+                    Err("object id not found")
+                } else {
+                    Ok(format!("remove {id}"))
+                }
+            }
+            Operation::SetTransform { id, transform } => {
+                let obj = self
+                    .objects
+                    .iter_mut()
+                    .find(|o| o.id == id)
+                    .ok_or("object id not found")?;
+                obj.transform = transform;
+                Ok(format!("set-transform {id}"))
+            }
+            Operation::Animate { id, animation } => {
+                let obj = self
+                    .objects
+                    .iter_mut()
+                    .find(|o| o.id == id)
+                    .ok_or("object id not found")?;
+                obj.animations.push(animation);
+                Ok(format!("animate {id}"))
+            }
+            Operation::CancelAnimation { id, property } => {
+                let obj = self
+                    .objects
+                    .iter_mut()
+                    .find(|o| o.id == id)
+                    .ok_or("object id not found")?;
+                let len_before = obj.animations.len();
+                if let Some(idx) = obj.animations.iter().position(|a| a.property == property) {
+                    obj.animations.remove(idx);
+                }
+                if obj.animations.len() == len_before {
+                    Ok(format!("cancel-animation {id} (no match)"))
+                } else {
+                    Ok(format!("cancel-animation {id}"))
+                }
+            }
+            Operation::FireAudio(cue) => {
+                self.audio.push(*cue);
+                Ok("fire-audio".to_string())
+            }
+            Operation::EndScene => Ok("end-scene".to_string()),
+        }
+    }
+
+    /// Apply a batch of operations sequentially. Stops at the first
+    /// error and returns the receipts gathered so far in the `Err`
+    /// arm's second element. Useful for replaying a recorded
+    /// control-plane log onto a fresh scene.
+    pub fn apply_batch(
+        &mut self,
+        ops: impl IntoIterator<Item = Operation>,
+    ) -> Result<Vec<String>, (Vec<String>, &'static str)> {
+        let mut receipts = Vec::new();
+        for op in ops {
+            match self.apply(op) {
+                Ok(r) => receipts.push(r),
+                Err(e) => return Err((receipts, e)),
+            }
+        }
+        Ok(receipts)
+    }
+
+    /// Splice another scene into this one. Used by NLE-style
+    /// compose-track-then-append workflows: prepare scene B against
+    /// a known time origin, then merge it onto scene A at a chosen
+    /// offset.
+    ///
+    /// Semantics:
+    ///
+    /// - **Objects** — every object from `other` is appended with its
+    ///   `lifetime` shifted by `time_offset` (lifetimes' `end` is
+    ///   only shifted when `Some`; `None` lifetimes stay open-ended)
+    ///   and its `z_order` offset by `z_offset` so it stacks above
+    ///   (or below) the existing objects without colliding.
+    /// - **Audio cues** — every cue from `other` is appended with
+    ///   its `trigger` shifted by `time_offset`.
+    /// - **Object ids** — preserved verbatim. If the caller wants
+    ///   uniqueness across the merged scene, they remap ids before
+    ///   calling.
+    /// - **Canvas, framerate, duration, metadata, pages, background**
+    ///   — `self`'s wins; nothing from `other` overrides.
+    /// - **Duration** — for finite scenes, `self.duration` is
+    ///   extended to cover any shifted lifetime that reaches past
+    ///   the current end.
+    ///
+    /// Returns the number of objects + cues appended.
+    pub fn merge(
+        &mut self,
+        other: &Scene,
+        time_offset: TimeStamp,
+        z_offset: i32,
+    ) -> (usize, usize) {
+        let n_obj = other.objects.len();
+        let n_cue = other.audio.len();
+
+        for obj in &other.objects {
+            let mut shifted = obj.clone();
+            shifted.lifetime = Lifetime {
+                start: obj.lifetime.start.saturating_add(time_offset),
+                end: obj.lifetime.end.map(|e| e.saturating_add(time_offset)),
+            };
+            shifted.z_order = obj.z_order.saturating_add(z_offset);
+            // Shift animation keyframe times so timing stays correct
+            // relative to the new origin.
+            for anim in shifted.animations.iter_mut() {
+                for kf in anim.keyframes.iter_mut() {
+                    kf.time = kf.time.saturating_add(time_offset);
+                }
+            }
+            self.objects.push(shifted);
+        }
+
+        for cue in &other.audio {
+            let mut shifted = cue.clone();
+            shifted.trigger = cue.trigger.saturating_add(time_offset);
+            self.audio.push(shifted);
+        }
+
+        // Extend our duration to cover any reach past the current end
+        // for finite scenes. Indefinite stays indefinite.
+        if let SceneDuration::Finite(end) = self.duration {
+            let mut new_end = end;
+            for obj in &other.objects {
+                if let Some(other_end) = obj.lifetime.end {
+                    let candidate = other_end.saturating_add(time_offset);
+                    if candidate > new_end {
+                        new_end = candidate;
+                    }
+                }
+            }
+            if let SceneDuration::Finite(other_end) = other.duration {
+                let candidate = other_end.saturating_add(time_offset);
+                if candidate > new_end {
+                    new_end = candidate;
+                }
+            }
+            if new_end != end {
+                self.duration = SceneDuration::Finite(new_end);
+            }
+        }
+
+        self.sort_by_z_order();
+        (n_obj, n_cue)
+    }
+
+    /// Allocate a fresh [`ObjectId`] guaranteed not to collide with
+    /// any existing object in the scene. Implementation: `max(id) +
+    /// 1` (with `0` reserved for the sentinel). Cheap O(N) — call
+    /// once per add, not in a tight loop.
+    pub fn next_object_id(&self) -> ObjectId {
+        let max = self.objects.iter().map(|o| o.id.raw()).max().unwrap_or(0);
+        ObjectId::new(max.saturating_add(1).max(1))
+    }
+
     /// Adapt a timeline-mode scene to discrete page-out points.
     /// Returns a `Vec<TimeStamp>` echoing `at_pts` filtered to
     /// in-range timestamps; the consumer renders one page per
@@ -200,6 +403,10 @@ pub enum Background {
     /// Solid colour, `0xRRGGBBAA`.
     Solid(u32),
     /// Vertical or horizontal gradient between two colours.
+    ///
+    /// Kept for the common two-colour case. For richer multi-stop
+    /// gradients, use [`Background::Gradient`] which carries a full
+    /// [`Gradient`] (linear or radial, any number of stops).
     LinearGradient {
         from: u32,
         to: u32,
@@ -210,6 +417,12 @@ pub enum Background {
     /// Bitmap background — cover or contain fit is up to the
     /// renderer's layout policy.
     Image(String),
+    /// Rich gradient background — multi-stop linear or radial. See
+    /// the [`crate::paint`] module for stop conventions; the same
+    /// per-channel linear interpolation as
+    /// [`crate::animation::KeyframeValue::Color`] is used by the
+    /// gradient shader.
+    Gradient(Gradient),
 }
 
 impl Default for Background {
@@ -261,7 +474,14 @@ pub struct Metadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{animation::Animation, duration::Lifetime, id::ObjectId, object::SceneObject};
+    use crate::{
+        animation::{AnimatedProperty, Animation, Easing, Keyframe, KeyframeValue, Repeat},
+        audio::{AudioCue, AudioSource, Generator},
+        id::ObjectId,
+        object::{SceneObject, Transform},
+        ops::Operation,
+        paint::{Gradient, Stop},
+    };
 
     #[test]
     fn visible_at_respects_lifetime() {
@@ -436,6 +656,323 @@ mod tests {
         assert_eq!(m.modified_at.as_deref(), Some("2026-05-04T12:00:00Z"));
         assert_eq!(m.custom.get("Trapped").map(String::as_str), Some("False"));
         assert_eq!(m.custom.len(), 2);
+    }
+
+    #[test]
+    fn apply_add_then_remove_roundtrip() {
+        let mut s = Scene::default();
+        let id = ObjectId::new(7);
+        let receipt = s
+            .apply(Operation::AddObject(Box::new(SceneObject {
+                id,
+                ..SceneObject::default()
+            })))
+            .unwrap();
+        assert!(receipt.starts_with("add "));
+        assert_eq!(s.objects.len(), 1);
+
+        let receipt = s.apply(Operation::RemoveObject { id, at: 0 }).unwrap();
+        assert!(receipt.starts_with("remove "));
+        assert!(s.objects.is_empty());
+    }
+
+    #[test]
+    fn apply_remove_unknown_id_errs() {
+        let mut s = Scene::default();
+        let err = s
+            .apply(Operation::RemoveObject {
+                id: ObjectId::new(99),
+                at: 0,
+            })
+            .unwrap_err();
+        assert_eq!(err, "object id not found");
+    }
+
+    #[test]
+    fn apply_set_transform_overwrites_base() {
+        let mut s = Scene::default();
+        let id = ObjectId::new(3);
+        s.objects.push(SceneObject {
+            id,
+            ..SceneObject::default()
+        });
+        let new_t = Transform {
+            position: (100.0, 50.0),
+            ..Transform::identity()
+        };
+        s.apply(Operation::SetTransform {
+            id,
+            transform: new_t,
+        })
+        .unwrap();
+        assert_eq!(s.objects[0].transform.position, (100.0, 50.0));
+    }
+
+    #[test]
+    fn apply_animate_appends_track() {
+        let mut s = Scene::default();
+        let id = ObjectId::new(11);
+        s.objects.push(SceneObject {
+            id,
+            ..SceneObject::default()
+        });
+        let anim = Animation::new(
+            AnimatedProperty::Opacity,
+            vec![
+                Keyframe {
+                    time: 0,
+                    value: KeyframeValue::Scalar(0.0),
+                    easing: None,
+                },
+                Keyframe {
+                    time: 100,
+                    value: KeyframeValue::Scalar(1.0),
+                    easing: None,
+                },
+            ],
+            Easing::Linear,
+            Repeat::Once,
+        );
+        s.apply(Operation::Animate {
+            id,
+            animation: anim,
+        })
+        .unwrap();
+        assert_eq!(s.objects[0].animations.len(), 1);
+    }
+
+    #[test]
+    fn apply_cancel_animation_removes_first_match() {
+        let mut s = Scene::default();
+        let id = ObjectId::new(11);
+        let anim = Animation::new(
+            AnimatedProperty::Opacity,
+            vec![Keyframe {
+                time: 0,
+                value: KeyframeValue::Scalar(0.0),
+                easing: None,
+            }],
+            Easing::Linear,
+            Repeat::Once,
+        );
+        s.objects.push(SceneObject {
+            id,
+            animations: vec![anim],
+            ..SceneObject::default()
+        });
+        let receipt = s
+            .apply(Operation::CancelAnimation {
+                id,
+                property: AnimatedProperty::Opacity,
+            })
+            .unwrap();
+        assert!(receipt.starts_with("cancel-animation "));
+        assert!(!receipt.contains("(no match)"));
+        assert!(s.objects[0].animations.is_empty());
+    }
+
+    #[test]
+    fn apply_cancel_animation_no_match_reports_silently() {
+        let mut s = Scene::default();
+        let id = ObjectId::new(11);
+        s.objects.push(SceneObject {
+            id,
+            ..SceneObject::default()
+        });
+        let receipt = s
+            .apply(Operation::CancelAnimation {
+                id,
+                property: AnimatedProperty::Opacity,
+            })
+            .unwrap();
+        assert!(receipt.contains("(no match)"));
+    }
+
+    #[test]
+    fn apply_fire_audio_appends_cue() {
+        let mut s = Scene::default();
+        s.apply(Operation::FireAudio(Box::new(AudioCue {
+            trigger: 500,
+            source: AudioSource::Generator(Generator::Silence),
+            volume: Animation::new(
+                AnimatedProperty::Volume,
+                Vec::new(),
+                Easing::Linear,
+                Repeat::Once,
+            ),
+            duck: Vec::new(),
+            end: None,
+        })))
+        .unwrap();
+        assert_eq!(s.audio.len(), 1);
+        assert_eq!(s.audio[0].trigger, 500);
+    }
+
+    #[test]
+    fn apply_batch_collects_receipts() {
+        let mut s = Scene::default();
+        let id = ObjectId::new(2);
+        let receipts = s
+            .apply_batch([
+                Operation::AddObject(Box::new(SceneObject {
+                    id,
+                    ..SceneObject::default()
+                })),
+                Operation::SetTransform {
+                    id,
+                    transform: Transform::identity(),
+                },
+                Operation::EndScene,
+            ])
+            .unwrap();
+        assert_eq!(receipts.len(), 3);
+    }
+
+    #[test]
+    fn apply_batch_stops_on_first_error() {
+        let mut s = Scene::default();
+        let (receipts, err) = s
+            .apply_batch([
+                Operation::EndScene,
+                Operation::RemoveObject {
+                    id: ObjectId::new(404),
+                    at: 0,
+                },
+                Operation::EndScene, // never reached
+            ])
+            .unwrap_err();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(err, "object id not found");
+    }
+
+    #[test]
+    fn merge_shifts_lifetimes_and_extends_duration() {
+        let mut a = Scene {
+            duration: SceneDuration::Finite(1000),
+            ..Scene::default()
+        };
+        a.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            lifetime: Lifetime {
+                start: 0,
+                end: Some(500),
+            },
+            z_order: 0,
+            ..SceneObject::default()
+        });
+
+        let mut b = Scene {
+            duration: SceneDuration::Finite(800),
+            ..Scene::default()
+        };
+        b.objects.push(SceneObject {
+            id: ObjectId::new(10),
+            lifetime: Lifetime {
+                start: 0,
+                end: Some(400),
+            },
+            z_order: 0,
+            ..SceneObject::default()
+        });
+
+        let (n_obj, n_cue) = a.merge(&b, 800, 100);
+        assert_eq!(n_obj, 1);
+        assert_eq!(n_cue, 0);
+        assert_eq!(a.objects.len(), 2);
+        // b had duration 800, shifted by 800 → 1600. b's object
+        // lifetime end is 400 + 800 = 1200, but b's own duration
+        // dominates. a's duration was 1000 → must extend to 1600.
+        assert_eq!(a.duration, SceneDuration::Finite(1600));
+        // z-order offset applied.
+        let merged = &a.objects.iter().find(|o| o.id.raw() == 10).unwrap();
+        assert_eq!(merged.z_order, 100);
+        assert_eq!(merged.lifetime.start, 800);
+        assert_eq!(merged.lifetime.end, Some(1200));
+    }
+
+    #[test]
+    fn merge_shifts_animation_keyframes() {
+        let mut a = Scene::default();
+        let mut b = Scene::default();
+        let anim = Animation::new(
+            AnimatedProperty::Opacity,
+            vec![
+                Keyframe {
+                    time: 0,
+                    value: KeyframeValue::Scalar(0.0),
+                    easing: None,
+                },
+                Keyframe {
+                    time: 100,
+                    value: KeyframeValue::Scalar(1.0),
+                    easing: None,
+                },
+            ],
+            Easing::Linear,
+            Repeat::Once,
+        );
+        b.objects.push(SceneObject {
+            id: ObjectId::new(5),
+            animations: vec![anim],
+            ..SceneObject::default()
+        });
+        a.merge(&b, 1_000, 0);
+        let merged = a.objects.iter().find(|o| o.id.raw() == 5).unwrap();
+        assert_eq!(merged.animations[0].keyframes[0].time, 1_000);
+        assert_eq!(merged.animations[0].keyframes[1].time, 1_100);
+    }
+
+    #[test]
+    fn merge_audio_cues_shift_too() {
+        let mut a = Scene::default();
+        let mut b = Scene::default();
+        b.audio.push(AudioCue {
+            trigger: 250,
+            source: AudioSource::Generator(Generator::Silence),
+            volume: Animation::new(
+                AnimatedProperty::Volume,
+                Vec::new(),
+                Easing::Linear,
+                Repeat::Once,
+            ),
+            duck: Vec::new(),
+            end: None,
+        });
+        let (_, n_cue) = a.merge(&b, 500, 0);
+        assert_eq!(n_cue, 1);
+        assert_eq!(a.audio[0].trigger, 750);
+    }
+
+    #[test]
+    fn next_object_id_avoids_collisions() {
+        let mut s = Scene::default();
+        assert_eq!(s.next_object_id().raw(), 1);
+        s.objects.push(SceneObject {
+            id: ObjectId::new(5),
+            ..SceneObject::default()
+        });
+        s.objects.push(SceneObject {
+            id: ObjectId::new(42),
+            ..SceneObject::default()
+        });
+        assert_eq!(s.next_object_id().raw(), 43);
+    }
+
+    #[test]
+    fn background_gradient_carries_full_stops() {
+        let bg = Background::Gradient(Gradient::linear(
+            45.0,
+            vec![
+                Stop::new(0.0, 0xFF0000FF),
+                Stop::new(0.5, 0x00FF00FF),
+                Stop::new(1.0, 0x0000FFFF),
+            ],
+        ));
+        if let Background::Gradient(g) = bg {
+            assert_eq!(g.stops().len(), 3);
+        } else {
+            panic!("expected Background::Gradient");
+        }
     }
 
     #[test]

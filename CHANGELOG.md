@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `paint` module: `Stop`, `Gradient` (multi-stop linear / radial),
+  `Paint` typed paint patterns. `Gradient::sample(t)` evaluates the
+  gradient at a normalised axis position via per-channel linear
+  interpolation (bit-identical to
+  `KeyframeValue::Color`'s lerp). All three types re-exported at
+  the crate root.
+- `Background::Gradient(Gradient)` — richer alternative to the
+  legacy two-colour `Background::LinearGradient { from, to,
+  angle_deg }`. Both variants coexist; the new one carries any
+  number of stops and supports radial fills.
+- `Scene::apply(op)` / `Scene::apply_batch(ops)` — in-process driver
+  for the `Operation` enum. Returns short receipts (`"add obj#7"`,
+  `"animate obj#3"`, …) suitable for compositor logs. Operations on
+  non-existent object ids return `Err("object id not found")`;
+  `apply_batch` stops at the first error and returns the receipts
+  gathered so far.
+- `Scene::merge(other, time_offset, z_offset)` — splices another
+  scene onto this one. Shifts object lifetimes + animation keyframe
+  times by `time_offset`, offsets `z_order` by `z_offset`, appends
+  audio cues with shifted triggers, and extends `Finite` durations
+  to cover any reach past the current end.
+- `Scene::next_object_id()` — allocates a fresh `ObjectId`
+  guaranteed not to collide with any existing object in the scene
+  (`max(id) + 1`).
+
+
 ## [0.1.3](https://github.com/OxideAV/oxideav-scene/compare/v0.1.2...v0.1.3) - 2026-05-04
 
 ### Other
