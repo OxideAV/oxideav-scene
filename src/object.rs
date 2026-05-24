@@ -147,6 +147,101 @@ impl Transform {
             skew: (0.0, 0.0),
         }
     }
+
+    /// Lower this high-level transform into a flat
+    /// [`oxideav_core::Transform2D`] (the SVG / PDF `matrix(a,b,c,d,e,f)`
+    /// form) for a content box of the given `(width, height)`.
+    ///
+    /// The struct's per-field semantics are realised in the documented
+    /// order: a point in object-local space is first moved so the
+    /// normalised [`anchor`](Self::anchor) sits at the origin, then
+    /// rotated, scaled, and sheared about that anchor, and finally
+    /// translated by [`position`](Self::position). Concretely the
+    /// returned matrix `M` satisfies
+    ///
+    /// ```text
+    /// M = T(position) · T(+pivot) · skew · scale · rotate · T(-pivot)
+    /// ```
+    ///
+    /// where `pivot = (anchor.0 * width, anchor.1 * height)`. Applying
+    /// `M` to a local point yields its canvas-space coordinate. The
+    /// identity [`Transform`] over any content size lowers to
+    /// [`Transform2D::identity`](oxideav_core::Transform2D::identity).
+    ///
+    /// `width` / `height` are the object's intrinsic content extent in
+    /// canvas units — only the anchor pivot depends on them, so a
+    /// zero-size content box still produces a well-formed (pivot-at-
+    /// origin) matrix.
+    pub fn to_matrix(&self, width: f32, height: f32) -> oxideav_core::Transform2D {
+        use oxideav_core::Transform2D as M;
+
+        let (px, py) = (self.anchor.0 * width, self.anchor.1 * height);
+
+        // Built right-to-left so the leftmost factor is applied last:
+        // start at the anchor-origin shift, then rotate, scale, skew,
+        // re-apply the pivot, and finally translate into place.
+        let mut m = M::translate(self.position.0, self.position.1);
+        m = m.compose(&M::translate(px, py));
+        // Skew: shear-X then shear-Y, matching Premiere's per-axis skew.
+        if self.skew.0 != 0.0 {
+            m = m.compose(&M::skew_x(self.skew.0));
+        }
+        if self.skew.1 != 0.0 {
+            m = m.compose(&M::skew_y(self.skew.1));
+        }
+        m = m.compose(&M::scale(self.scale.0, self.scale.1));
+        if self.rotation != 0.0 {
+            m = m.compose(&M::rotate(self.rotation));
+        }
+        m = m.compose(&M::translate(-px, -py));
+        m
+    }
+
+    /// Map an object-local point into canvas space under this
+    /// transform, for a content box of `(width, height)`. Convenience
+    /// over [`to_matrix`](Self::to_matrix) +
+    /// [`Transform2D::apply`](oxideav_core::Transform2D::apply).
+    pub fn apply_to_point(
+        &self,
+        width: f32,
+        height: f32,
+        point: oxideav_core::Point,
+    ) -> oxideav_core::Point {
+        self.to_matrix(width, height).apply(point)
+    }
+
+    /// Axis-aligned bounding box, in canvas space, of a
+    /// `(width, height)` content box placed at the local origin
+    /// `(0, 0)..(width, height)` and run through this transform.
+    ///
+    /// Computed by mapping the box's four corners and taking the min /
+    /// max of the results, so it is tight for translate / scale / skew
+    /// and a correct (rotation-aware) enclosing box for rotations —
+    /// the AABB grows to contain a rotated rectangle rather than
+    /// rotating with it. The returned [`oxideav_core::Rect`] always has
+    /// non-negative `width` / `height`.
+    pub fn bbox(&self, width: f32, height: f32) -> oxideav_core::Rect {
+        use oxideav_core::Point;
+
+        let m = self.to_matrix(width, height);
+        let corners = [
+            m.apply(Point::new(0.0, 0.0)),
+            m.apply(Point::new(width, 0.0)),
+            m.apply(Point::new(width, height)),
+            m.apply(Point::new(0.0, height)),
+        ];
+        let mut min_x = corners[0].x;
+        let mut min_y = corners[0].y;
+        let mut max_x = corners[0].x;
+        let mut max_y = corners[0].y;
+        for p in &corners[1..] {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+        oxideav_core::Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
+    }
 }
 
 impl Default for Transform {
@@ -321,5 +416,68 @@ mod tests {
         assert_eq!(o.opacity, 1.0);
         assert_eq!(o.blend_mode, BlendMode::Normal);
         assert!(o.animations.is_empty());
+    }
+
+    #[test]
+    fn identity_transform_lowers_to_identity_matrix() {
+        let m = Transform::identity().to_matrix(100.0, 50.0);
+        assert!(m.is_identity());
+    }
+
+    #[test]
+    fn translate_only_offsets_points() {
+        let t = Transform {
+            position: (10.0, -5.0),
+            ..Transform::identity()
+        };
+        // Pure translation is anchor-independent.
+        let p = t.apply_to_point(40.0, 40.0, oxideav_core::Point::new(3.0, 7.0));
+        assert!((p.x - 13.0).abs() < 1e-5);
+        assert!((p.y - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scale_pivots_about_anchor_centre() {
+        // Anchor at centre of a 20x20 box → pivot (10,10). 2x scale
+        // keeps the pivot fixed and pushes corners out symmetrically.
+        let t = Transform {
+            scale: (2.0, 2.0),
+            ..Transform::identity()
+        };
+        let centre = t.apply_to_point(20.0, 20.0, oxideav_core::Point::new(10.0, 10.0));
+        assert!((centre.x - 10.0).abs() < 1e-5);
+        assert!((centre.y - 10.0).abs() < 1e-5);
+        let bb = t.bbox(20.0, 20.0);
+        // 20x20 scaled 2x about centre → 40x40 centred on (10,10).
+        assert!((bb.width - 40.0).abs() < 1e-4);
+        assert!((bb.height - 40.0).abs() < 1e-4);
+        assert!((bb.x - (-10.0)).abs() < 1e-4);
+        assert!((bb.y - (-10.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn quarter_turn_bbox_swaps_extent() {
+        // 90° rotation of a 40x10 box about its centre → AABB 10x40.
+        let t = Transform {
+            rotation: std::f32::consts::FRAC_PI_2,
+            ..Transform::identity()
+        };
+        let bb = t.bbox(40.0, 10.0);
+        assert!((bb.width - 10.0).abs() < 1e-3);
+        assert!((bb.height - 40.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bbox_extent_is_never_negative() {
+        let t = Transform {
+            scale: (-3.0, 0.5),
+            rotation: 1.1,
+            skew: (0.3, -0.2),
+            position: (12.0, -4.0),
+            anchor: (0.25, 0.75),
+        };
+        let bb = t.bbox(30.0, 18.0);
+        assert!(bb.width >= 0.0);
+        assert!(bb.height >= 0.0);
     }
 }

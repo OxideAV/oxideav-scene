@@ -33,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Scene::next_object_id()` — allocates a fresh `ObjectId`
   guaranteed not to collide with any existing object in the scene
   (`max(id) + 1`).
+- `Transform::to_matrix(width, height)` — lowers the high-level
+  position / scale / rotation / anchor / skew transform into a flat
+  `oxideav_core::Transform2D` (the SVG / PDF `matrix(a,b,c,d,e,f)`
+  form), realising the documented application order with the
+  normalised anchor resolved against the given content size.
+- `Transform::apply_to_point(width, height, point)` — maps an
+  object-local `oxideav_core::Point` into canvas space; sugar over
+  `to_matrix().apply()`.
+- `Transform::bbox(width, height)` — axis-aligned `oxideav_core::Rect`
+  enclosing a `(width, height)` content box after the transform.
+  Tight for translate / scale / skew, rotation-aware (grows to
+  contain a rotated rectangle), with non-negative extent. Backed by a
+  deterministic property-test suite (`tests/transform_props.rs`):
+  identity no-op, helper/matrix agreement, AABB corner-containment +
+  tightness, rotation area lower-bound, and translation commutativity.
 
 
 ## [0.1.3](https://github.com/OxideAV/oxideav-scene/compare/v0.1.2...v0.1.3) - 2026-05-04
