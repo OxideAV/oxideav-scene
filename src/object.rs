@@ -122,6 +122,97 @@ pub enum ObjectKind {
     Vector(oxideav_core::VectorFrame),
 }
 
+impl ObjectKind {
+    /// Object-local content extent for the kinds that carry one
+    /// intrinsically.
+    ///
+    /// - [`ObjectKind::Vector`] — the underlying
+    ///   [`oxideav_core::VectorFrame`]'s viewport `(width, height)`.
+    /// - [`ObjectKind::Shape`] — delegates to [`Shape::content_size`].
+    /// - [`ObjectKind::Live`] — the source's
+    ///   [`hint_size`](LiveStreamHandle::hint_size), cast to `f32`
+    ///   when present.
+    /// - [`ObjectKind::Image`], [`ObjectKind::Video`],
+    ///   [`ObjectKind::Text`], [`ObjectKind::Group`] — return
+    ///   `None`. These kinds either pull their extent from a frame
+    ///   the renderer fetches at render time (image / video / live
+    ///   without a hint), from a shaping engine the scene crate
+    ///   doesn't bind (text), or from their referenced children
+    ///   resolved against a scene (group). Callers wanting a
+    ///   geometry estimate for these kinds pass a fallback into
+    ///   [`SceneObject::bbox`].
+    pub fn content_size(&self) -> Option<(f32, f32)> {
+        match self {
+            ObjectKind::Vector(vf) => Some((vf.width, vf.height)),
+            ObjectKind::Shape(s) => s.content_size(),
+            ObjectKind::Live(h) => h.hint_size.map(|(w, h)| (w as f32, h as f32)),
+            ObjectKind::Image(_)
+            | ObjectKind::Video(_)
+            | ObjectKind::Text(_)
+            | ObjectKind::Group(_) => None,
+        }
+    }
+}
+
+impl SceneObject {
+    /// Object-local content extent — sugar over
+    /// [`ObjectKind::content_size`] for the object's own kind. See
+    /// that method for which kinds report a size and which return
+    /// `None`.
+    pub fn content_size(&self) -> Option<(f32, f32)> {
+        self.kind.content_size()
+    }
+
+    /// Axis-aligned bounding box of this object in canvas space.
+    ///
+    /// The intrinsic content extent is taken from
+    /// [`SceneObject::content_size`] when available; otherwise
+    /// `fallback` is used — pass the canvas size (or a per-object
+    /// hint from the renderer) for kinds whose content size isn't
+    /// known to the scene layer (raster images, video, text runs).
+    /// The chosen extent is then run through
+    /// [`Transform::bbox`](Transform::bbox) and finally intersected
+    /// with [`SceneObject::clip`] if the object carries one.
+    ///
+    /// Clipping is conservative: the returned rectangle is the
+    /// *intersection* of the transformed content AABB with the clip
+    /// rect, expressed in canvas coordinates. The clip's coordinates
+    /// are interpreted as already living in canvas space (matching
+    /// the [`ClipRect`] doc-comment). When the intersection is empty
+    /// the returned rect has zero width / height — the caller can
+    /// detect culling by checking `rect.width == 0.0 ||
+    /// rect.height == 0.0`.
+    pub fn bbox(&self, fallback: (f32, f32)) -> oxideav_core::Rect {
+        let (w, h) = self.content_size().unwrap_or(fallback);
+        let bb = self.transform.bbox(w, h);
+        match self.clip {
+            None => bb,
+            Some(clip) => intersect_rect(bb, clip),
+        }
+    }
+}
+
+/// Intersect the transformed-object AABB with a [`ClipRect`] given
+/// in canvas space. Returns a [`Rect`] with non-negative extent;
+/// extent is zero on both axes when the rectangles do not overlap.
+fn intersect_rect(a: oxideav_core::Rect, clip: ClipRect) -> oxideav_core::Rect {
+    let ax2 = a.x + a.width;
+    let ay2 = a.y + a.height;
+    let bx1 = clip.x;
+    let by1 = clip.y;
+    let bx2 = clip.x + clip.width;
+    let by2 = clip.y + clip.height;
+    let x1 = a.x.max(bx1);
+    let y1 = a.y.max(by1);
+    let x2 = ax2.min(bx2);
+    let y2 = ay2.min(by2);
+    if x2 <= x1 || y2 <= y1 {
+        oxideav_core::Rect::new(x1, y1, 0.0, 0.0)
+    } else {
+        oxideav_core::Rect::new(x1, y1, x2 - x1, y2 - y1)
+    }
+}
+
 /// Affine placement on the canvas. Applied in this order:
 /// translate → anchor-relative rotate → scale → skew.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -361,6 +452,46 @@ impl Shape {
             corner_radius: 0.0,
         }
     }
+
+    /// Object-local content extent — the `(width, height)` of the
+    /// minimal axis-aligned box that contains the shape's geometry
+    /// in its own coordinate system (before any [`Transform`] is
+    /// applied).
+    ///
+    /// - [`Shape::Rect`] reports its declared `(width, height)`
+    ///   verbatim. A rounded rect with `corner_radius > 0` still has
+    ///   the same outer bound; the rounding only carves area away
+    ///   *inside* the box.
+    /// - [`Shape::Polygon`] reports the bounding box of its `points`
+    ///   list. An empty polygon reports `(0.0, 0.0)`.
+    /// - [`Shape::Path`] is not parsed here — the SVG `data` string
+    ///   is opaque to this crate. Returns `None`; callers either
+    ///   parse the data themselves or supply a fallback content
+    ///   size to [`SceneObject::bbox`].
+    ///
+    /// Stroke half-widths are NOT included; the bounds reflect the
+    /// filled geometry only. A rasteriser that needs the stroked
+    /// silhouette must inflate the result by `stroke.width / 2`.
+    pub fn content_size(&self) -> Option<(f32, f32)> {
+        match self {
+            Shape::Rect { width, height, .. } => Some((*width, *height)),
+            Shape::Polygon { points, .. } => {
+                if points.is_empty() {
+                    return Some((0.0, 0.0));
+                }
+                let (mut min_x, mut min_y) = points[0];
+                let (mut max_x, mut max_y) = (min_x, min_y);
+                for &(x, y) in &points[1..] {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+                Some(((max_x - min_x).max(0.0), (max_y - min_y).max(0.0)))
+            }
+            Shape::Path { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -479,5 +610,167 @@ mod tests {
         let bb = t.bbox(30.0, 18.0);
         assert!(bb.width >= 0.0);
         assert!(bb.height >= 0.0);
+    }
+
+    #[test]
+    fn shape_rect_reports_its_own_extent() {
+        let s = Shape::Rect {
+            width: 80.0,
+            height: 30.0,
+            fill: 0,
+            stroke: None,
+            corner_radius: 4.0,
+        };
+        assert_eq!(s.content_size(), Some((80.0, 30.0)));
+    }
+
+    #[test]
+    fn shape_polygon_reports_aabb_of_points() {
+        let s = Shape::Polygon {
+            points: vec![(-3.0, 5.0), (10.0, -2.0), (7.0, 12.0)],
+            fill: 0,
+            stroke: None,
+        };
+        // x ∈ [-3, 10] → width 13. y ∈ [-2, 12] → height 14.
+        assert_eq!(s.content_size(), Some((13.0, 14.0)));
+    }
+
+    #[test]
+    fn empty_polygon_has_zero_extent() {
+        let s = Shape::Polygon {
+            points: Vec::new(),
+            fill: 0,
+            stroke: None,
+        };
+        assert_eq!(s.content_size(), Some((0.0, 0.0)));
+    }
+
+    #[test]
+    fn shape_path_extent_is_opaque() {
+        let s = Shape::Path {
+            data: "M10,10 L20,20".to_string(),
+            fill: 0,
+            stroke: None,
+        };
+        assert!(s.content_size().is_none());
+    }
+
+    #[test]
+    fn live_kind_uses_hint_size_when_present() {
+        let live = ObjectKind::Live(LiveStreamHandle {
+            uri: "rtmp://x".into(),
+            hint_size: Some((1280, 720)),
+        });
+        assert_eq!(live.content_size(), Some((1280.0, 720.0)));
+        let live_blank = ObjectKind::Live(LiveStreamHandle {
+            uri: "rtmp://x".into(),
+            hint_size: None,
+        });
+        assert!(live_blank.content_size().is_none());
+    }
+
+    #[test]
+    fn vector_kind_pulls_extent_from_frame_viewport() {
+        let vf = oxideav_core::VectorFrame::new(640.0, 480.0);
+        let k = ObjectKind::Vector(vf);
+        assert_eq!(k.content_size(), Some((640.0, 480.0)));
+    }
+
+    #[test]
+    fn image_video_text_group_have_no_intrinsic_extent() {
+        assert!(ObjectKind::Text(TextRun::default())
+            .content_size()
+            .is_none());
+        assert!(ObjectKind::Group(Vec::new()).content_size().is_none());
+    }
+
+    #[test]
+    fn scene_object_bbox_uses_intrinsic_extent() {
+        let obj = SceneObject {
+            kind: ObjectKind::Shape(Shape::Rect {
+                width: 40.0,
+                height: 20.0,
+                fill: 0,
+                stroke: None,
+                corner_radius: 0.0,
+            }),
+            transform: Transform {
+                position: (5.0, 7.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        };
+        // Fallback is ignored: the shape supplies its own (40, 20).
+        let bb = obj.bbox((1000.0, 1000.0));
+        assert!((bb.x - 5.0).abs() < 1e-4);
+        assert!((bb.y - 7.0).abs() < 1e-4);
+        assert!((bb.width - 40.0).abs() < 1e-4);
+        assert!((bb.height - 20.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn scene_object_bbox_falls_back_for_extentless_kinds() {
+        let obj = SceneObject {
+            kind: ObjectKind::Text(TextRun::default()),
+            transform: Transform {
+                position: (10.0, 20.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        };
+        let bb = obj.bbox((100.0, 50.0));
+        assert!((bb.x - 10.0).abs() < 1e-4);
+        assert!((bb.y - 20.0).abs() < 1e-4);
+        assert!((bb.width - 100.0).abs() < 1e-4);
+        assert!((bb.height - 50.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn scene_object_bbox_clips_to_clip_rect() {
+        let obj = SceneObject {
+            kind: ObjectKind::Shape(Shape::Rect {
+                width: 100.0,
+                height: 100.0,
+                fill: 0,
+                stroke: None,
+                corner_radius: 0.0,
+            }),
+            transform: Transform::identity(),
+            clip: Some(ClipRect {
+                x: 20.0,
+                y: 30.0,
+                width: 50.0,
+                height: 40.0,
+            }),
+            ..SceneObject::default()
+        };
+        let bb = obj.bbox((0.0, 0.0));
+        assert!((bb.x - 20.0).abs() < 1e-4);
+        assert!((bb.y - 30.0).abs() < 1e-4);
+        assert!((bb.width - 50.0).abs() < 1e-4);
+        assert!((bb.height - 40.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn scene_object_bbox_clip_with_no_overlap_collapses_to_zero() {
+        let obj = SceneObject {
+            kind: ObjectKind::Shape(Shape::Rect {
+                width: 10.0,
+                height: 10.0,
+                fill: 0,
+                stroke: None,
+                corner_radius: 0.0,
+            }),
+            transform: Transform::identity(),
+            clip: Some(ClipRect {
+                x: 500.0,
+                y: 500.0,
+                width: 50.0,
+                height: 50.0,
+            }),
+            ..SceneObject::default()
+        };
+        let bb = obj.bbox((0.0, 0.0));
+        assert!(bb.width <= 0.0 || bb.height <= 0.0);
     }
 }

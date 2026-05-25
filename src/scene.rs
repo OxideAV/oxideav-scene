@@ -375,6 +375,112 @@ impl Scene {
         ObjectId::new(max.saturating_add(1).max(1))
     }
 
+    /// Union axis-aligned bounding box of every object live at time
+    /// `t`, in canvas space. `None` when no object is live at `t`.
+    ///
+    /// Per-object bounds are computed via
+    /// [`SceneObject::bbox`](crate::SceneObject::bbox) — see that
+    /// method for the content-size lookup + clip semantics.
+    /// `fallback` is forwarded verbatim for objects whose kind
+    /// doesn't expose an intrinsic content size (raster images,
+    /// video frames, text runs); pass the canvas dims (or any
+    /// per-object hint the caller has) so those objects still
+    /// contribute a sensible AABB.
+    ///
+    /// The union is the smallest axis-aligned rectangle enclosing
+    /// every contributing object box. Clipped objects with an empty
+    /// intersection (zero extent) are skipped — they would otherwise
+    /// drag the union to their min corner without contributing
+    /// useful coverage. Object opacity, [`BlendMode`](crate::BlendMode),
+    /// and [`Effect`](crate::Effect) chains are NOT considered:
+    /// `bbox_at` reports the *geometric* footprint, not the
+    /// *visible* one.
+    pub fn bbox_at(
+        &self,
+        t: crate::duration::TimeStamp,
+        fallback: (f32, f32),
+    ) -> Option<oxideav_core::Rect> {
+        let mut acc: Option<(f32, f32, f32, f32)> = None;
+        for o in &self.objects {
+            if !o.lifetime.is_live_at(t) {
+                continue;
+            }
+            let bb = o.bbox(fallback);
+            // Skip clipped-out objects so they don't pull the union
+            // toward their clip corner.
+            if bb.width <= 0.0 || bb.height <= 0.0 {
+                continue;
+            }
+            let (x1, y1, x2, y2) = (bb.x, bb.y, bb.x + bb.width, bb.y + bb.height);
+            acc = Some(match acc {
+                None => (x1, y1, x2, y2),
+                Some((mx1, my1, mx2, my2)) => (mx1.min(x1), my1.min(y1), mx2.max(x2), my2.max(y2)),
+            });
+        }
+        acc.map(|(x1, y1, x2, y2)| oxideav_core::Rect::new(x1, y1, x2 - x1, y2 - y1))
+    }
+
+    /// Identify the top-most object whose axis-aligned bounding box
+    /// (per [`SceneObject::bbox`](crate::SceneObject::bbox)) contains
+    /// `point` at scene time `t`, returning its [`ObjectId`].
+    ///
+    /// "Top-most" follows the painter's algorithm: higher `z_order`
+    /// wins, ties broken by later position in
+    /// [`Scene::objects`](Self::objects) (i.e. last-added on top).
+    /// Returns `None` when no live object's AABB contains `point`.
+    ///
+    /// This is a *bounding-box* hit test, not a per-pixel shape hit
+    /// test. A rotated rectangle's AABB contains corners that the
+    /// rectangle itself does not — callers needing pixel-accurate
+    /// picking (e.g. for clicking on a polygon hole) should follow
+    /// this up with a per-shape contains check. Hit-testing through
+    /// transparent regions of a bitmap is similarly not handled
+    /// here — the AABB is the geometric footprint, opacity is
+    /// ignored.
+    ///
+    /// `fallback` is the content size used for kinds without an
+    /// intrinsic extent (raster images, video, text). The caller
+    /// supplies it for the same reasons as
+    /// [`Scene::bbox_at`](Self::bbox_at).
+    pub fn hit_test_at(
+        &self,
+        t: crate::duration::TimeStamp,
+        point: oxideav_core::Point,
+        fallback: (f32, f32),
+    ) -> Option<ObjectId> {
+        // Walk all candidates with their original index so the
+        // tie-break (later index wins at equal z_order) is exact.
+        let mut hit: Option<(i32, usize, ObjectId)> = None;
+        for (idx, o) in self.objects.iter().enumerate() {
+            if !o.lifetime.is_live_at(t) {
+                continue;
+            }
+            let bb = o.bbox(fallback);
+            if bb.width <= 0.0 || bb.height <= 0.0 {
+                continue;
+            }
+            if point.x < bb.x
+                || point.x > bb.x + bb.width
+                || point.y < bb.y
+                || point.y > bb.y + bb.height
+            {
+                continue;
+            }
+            let cand = (o.z_order, idx, o.id);
+            hit = Some(match hit {
+                None => cand,
+                Some(prev) => {
+                    if cand.0 > prev.0 || (cand.0 == prev.0 && cand.1 > prev.1) {
+                        cand
+                    } else {
+                        prev
+                    }
+                }
+            });
+        }
+        hit.map(|(_, _, id)| id)
+    }
+
     /// Adapt a timeline-mode scene to discrete page-out points.
     /// Returns a `Vec<TimeStamp>` echoing `at_pts` filtered to
     /// in-range timestamps; the consumer renders one page per
@@ -1003,5 +1109,129 @@ mod tests {
         assert_eq!(scene.objects[0].id, ObjectId::new(3));
         assert_eq!(scene.objects[1].id, ObjectId::new(1));
         assert_eq!(scene.objects[2].id, ObjectId::new(2));
+    }
+
+    // ---- bbox_at / hit_test_at -----------------------------------
+
+    use crate::object::{ClipRect, ObjectKind, Shape};
+
+    fn rect_obj(id: u64, x: f32, y: f32, w: f32, h: f32, z: i32) -> SceneObject {
+        SceneObject {
+            id: ObjectId::new(id),
+            kind: ObjectKind::Shape(Shape::Rect {
+                width: w,
+                height: h,
+                fill: 0,
+                stroke: None,
+                corner_radius: 0.0,
+            }),
+            transform: Transform {
+                position: (x, y),
+                ..Transform::identity()
+            },
+            z_order: z,
+            ..SceneObject::default()
+        }
+    }
+
+    #[test]
+    fn bbox_at_returns_none_for_empty_scene() {
+        let s = Scene::default();
+        assert!(s.bbox_at(0, (1920.0, 1080.0)).is_none());
+    }
+
+    #[test]
+    fn bbox_at_returns_union_of_live_object_aabbs() {
+        let mut s = Scene::default();
+        s.objects.push(rect_obj(1, 0.0, 0.0, 10.0, 10.0, 0));
+        s.objects.push(rect_obj(2, 50.0, 80.0, 20.0, 20.0, 0));
+        let bb = s.bbox_at(0, (0.0, 0.0)).unwrap();
+        // Union spans x ∈ [0, 70], y ∈ [0, 100].
+        assert!((bb.x - 0.0).abs() < 1e-4);
+        assert!((bb.y - 0.0).abs() < 1e-4);
+        assert!((bb.width - 70.0).abs() < 1e-4);
+        assert!((bb.height - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn bbox_at_skips_dead_objects() {
+        let mut s = Scene {
+            duration: SceneDuration::Finite(1000),
+            ..Scene::default()
+        };
+        let mut alive = rect_obj(1, 0.0, 0.0, 10.0, 10.0, 0);
+        alive.lifetime = Lifetime::default(); // always live
+        s.objects.push(alive);
+        let mut dead = rect_obj(2, 500.0, 500.0, 100.0, 100.0, 0);
+        dead.lifetime = Lifetime {
+            start: 500,
+            end: Some(600),
+        };
+        s.objects.push(dead);
+        // At t=10 only the always-live object contributes; the
+        // dead one would have stretched the union to (600, 600).
+        let bb = s.bbox_at(10, (0.0, 0.0)).unwrap();
+        assert!((bb.width - 10.0).abs() < 1e-4);
+        assert!((bb.height - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn bbox_at_skips_clipped_out_objects() {
+        let mut s = Scene::default();
+        s.objects.push(rect_obj(1, 0.0, 0.0, 10.0, 10.0, 0));
+        let mut clipped = rect_obj(2, 0.0, 0.0, 100.0, 100.0, 0);
+        // Clip rect that misses the object entirely.
+        clipped.clip = Some(ClipRect {
+            x: 9999.0,
+            y: 9999.0,
+            width: 1.0,
+            height: 1.0,
+        });
+        s.objects.push(clipped);
+        let bb = s.bbox_at(0, (0.0, 0.0)).unwrap();
+        assert!((bb.width - 10.0).abs() < 1e-4);
+        assert!((bb.height - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hit_test_at_returns_top_object_under_point() {
+        let mut s = Scene::default();
+        s.objects.push(rect_obj(1, 0.0, 0.0, 100.0, 100.0, 0));
+        s.objects.push(rect_obj(2, 0.0, 0.0, 100.0, 100.0, 5));
+        s.objects.push(rect_obj(3, 0.0, 0.0, 100.0, 100.0, 2));
+        let hit = s.hit_test_at(0, oxideav_core::Point::new(50.0, 50.0), (0.0, 0.0));
+        assert_eq!(hit, Some(ObjectId::new(2)));
+    }
+
+    #[test]
+    fn hit_test_at_ties_break_by_insertion_order() {
+        let mut s = Scene::default();
+        s.objects.push(rect_obj(1, 0.0, 0.0, 100.0, 100.0, 5));
+        s.objects.push(rect_obj(2, 0.0, 0.0, 100.0, 100.0, 5));
+        let hit = s.hit_test_at(0, oxideav_core::Point::new(10.0, 10.0), (0.0, 0.0));
+        // Later-added wins at equal z_order.
+        assert_eq!(hit, Some(ObjectId::new(2)));
+    }
+
+    #[test]
+    fn hit_test_at_misses_when_no_object_under_point() {
+        let mut s = Scene::default();
+        s.objects.push(rect_obj(1, 0.0, 0.0, 10.0, 10.0, 0));
+        let hit = s.hit_test_at(0, oxideav_core::Point::new(500.0, 500.0), (0.0, 0.0));
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn hit_test_at_ignores_dead_objects() {
+        let mut s = Scene::default();
+        let mut dead = rect_obj(1, 0.0, 0.0, 100.0, 100.0, 0);
+        dead.lifetime = Lifetime {
+            start: 100,
+            end: Some(200),
+        };
+        s.objects.push(dead);
+        // t = 0 → object is not yet live.
+        let hit = s.hit_test_at(0, oxideav_core::Point::new(50.0, 50.0), (0.0, 0.0));
+        assert!(hit.is_none());
     }
 }

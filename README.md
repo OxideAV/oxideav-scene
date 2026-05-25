@@ -188,6 +188,38 @@ pub enum Easing {
 Keyframe values are typed per property (`Vec2`, `f32`, colour, etc.)
 via a `KeyframeValue` enum that `interpolate(a, b, t, easing)` acts on.
 
+### Geometry queries
+
+The transform layer composes upward into per-object and scene-wide
+AABB accessors so layout, selection, and culling layers don't need
+to walk the object list by hand:
+
+- `Shape::content_size()` / `ObjectKind::content_size()` /
+  `SceneObject::content_size()` report the object-local
+  `(width, height)` for the kinds that carry one intrinsically
+  (`Vector`'s viewport, `Shape::Rect` / `Shape::Polygon` AABB,
+  `Live`'s `hint_size`). Image, video, text and group return
+  `None` — those extents come from the renderer, not the model.
+- `SceneObject::bbox(fallback)` returns the object's AABB in
+  canvas space: intrinsic content size when known, the
+  caller-supplied `fallback` otherwise; piped through
+  `Transform::bbox` and then intersected with `ClipRect` if the
+  object carries one (zero extent on no overlap so callers can
+  cull).
+- `Scene::bbox_at(t, fallback)` is the union AABB of every
+  live object at scene time `t` — `None` for an empty / fully-
+  dead scene, otherwise the smallest axis-aligned box enclosing
+  every contributing object footprint. Dead and clipped-out
+  objects are skipped so they don't pull the union to their
+  corners. Geometric footprint only — opacity, blend mode, and
+  effect chains are not modelled.
+- `Scene::hit_test_at(t, point, fallback)` returns the
+  `ObjectId` of the top-most live object whose AABB contains
+  `point`. Painter's-algorithm order: higher `z_order` wins,
+  ties broken by later insertion. AABB-only — a rotated rect's
+  AABB contains corners the rect itself does not, so a
+  per-pixel picker layered on top of this remains a follow-up.
+
 ### AudioCue
 
 ```rust

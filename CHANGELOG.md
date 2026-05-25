@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Shape::content_size()` — object-local `(width, height)` for the
+  shape's filled geometry. `Rect` reports its declared dims; `Polygon`
+  reports the AABB of its `points` (empty polygon → `(0, 0)`); `Path`
+  is opaque (`None`). Stroke half-widths are excluded.
+- `ObjectKind::content_size()` / `SceneObject::content_size()` —
+  intrinsic content extent for kinds that carry one. `Vector` pulls
+  from the underlying `oxideav_core::VectorFrame` viewport, `Shape`
+  delegates to `Shape::content_size`, `Live` uses `hint_size`;
+  `Image` / `Video` / `Text` / `Group` return `None`.
+- `SceneObject::bbox(fallback)` — axis-aligned bounding box of the
+  object in canvas space. Uses the object's intrinsic
+  `content_size` when available, otherwise the caller-supplied
+  `fallback`; pipes through `Transform::bbox`; intersects with
+  `ClipRect` (zero-extent on no overlap so callers can cull).
+- `Scene::bbox_at(t, fallback)` — union AABB of every object live
+  at scene time `t`. Skips dead objects and zero-extent (clipped-
+  out) objects so they don't pull the union toward their corners.
+  Geometric footprint only — opacity / blend / effects are not
+  considered.
+- `Scene::hit_test_at(t, point, fallback)` — top-most live
+  object's `ObjectId` whose AABB contains `point`. Painter's-
+  algorithm order: higher `z_order` wins, ties broken by later
+  insertion in `Scene::objects`. AABB-only (not per-pixel shape
+  containment).
+- Backing property-test suite at
+  `tests/scene_geometry_props.rs`: deterministic xorshift PRNG
+  drives 7 invariants (empty scene → `None`, single-object
+  identity, member-coverage, dead-object skipping, top-z-order
+  hit, miss outside, clip-collapses-contribution).
 - `paint` module: `Stop`, `Gradient` (multi-stop linear / radial),
   `Paint` typed paint patterns. `Gradient::sample(t)` evaluates the
   gradient at a normalised axis position via per-channel linear
