@@ -481,6 +481,31 @@ impl Scene {
         hit.map(|(_, _, id)| id)
     }
 
+    /// Sample every object live at time `t` and return the resolved
+    /// per-object state in paint order (z-order ascending; ties broken
+    /// by insertion order, matching
+    /// [`visible_at`](Self::visible_at)).
+    ///
+    /// Each returned [`crate::object::Sample`] carries the object's
+    /// composed transform + opacity + forwarded compositor fields, so
+    /// a renderer can iterate the result, look the matching
+    /// [`SceneObject`] up by `id` for its `kind` payload, and feed
+    /// state straight into the painter — no further animation
+    /// evaluation needed.
+    ///
+    /// See [`SceneObject::sample_at`] for the per-object composition
+    /// rule. The returned [`Vec`] is empty when no object is live at
+    /// `t`.
+    pub fn sampled_at(&self, t: crate::duration::TimeStamp) -> Vec<crate::object::Sample> {
+        let mut refs: Vec<&SceneObject> = self
+            .objects
+            .iter()
+            .filter(|o| o.lifetime.is_live_at(t))
+            .collect();
+        refs.sort_by_key(|o| o.z_order);
+        refs.into_iter().map(|o| o.sample_at(t)).collect()
+    }
+
     /// Adapt a timeline-mode scene to discrete page-out points.
     /// Returns a `Vec<TimeStamp>` echoing `at_pts` filtered to
     /// in-range timestamps; the consumer renders one page per
@@ -1233,5 +1258,87 @@ mod tests {
         // t = 0 → object is not yet live.
         let hit = s.hit_test_at(0, oxideav_core::Point::new(50.0, 50.0), (0.0, 0.0));
         assert!(hit.is_none());
+    }
+
+    #[test]
+    fn sampled_at_returns_empty_for_empty_scene() {
+        let s = Scene::default();
+        assert!(s.sampled_at(0).is_empty());
+    }
+
+    #[test]
+    fn sampled_at_returns_paint_order_z_ascending() {
+        let mut s = Scene::default();
+        s.objects.push(rect_obj(1, 0.0, 0.0, 10.0, 10.0, 5));
+        s.objects.push(rect_obj(2, 0.0, 0.0, 10.0, 10.0, 1));
+        s.objects.push(rect_obj(3, 0.0, 0.0, 10.0, 10.0, 3));
+        let samples = s.sampled_at(0);
+        // Paint-order = z ascending: ids 2, 3, 1.
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].id, ObjectId::new(2));
+        assert_eq!(samples[1].id, ObjectId::new(3));
+        assert_eq!(samples[2].id, ObjectId::new(1));
+    }
+
+    #[test]
+    fn sampled_at_skips_dead_objects() {
+        let mut s = Scene {
+            duration: SceneDuration::Finite(1000),
+            ..Scene::default()
+        };
+        let mut dead = rect_obj(1, 0.0, 0.0, 10.0, 10.0, 0);
+        dead.lifetime = Lifetime {
+            start: 500,
+            end: Some(600),
+        };
+        s.objects.push(dead);
+        s.objects.push(rect_obj(2, 0.0, 0.0, 10.0, 10.0, 0));
+        let samples = s.sampled_at(0);
+        // Dead one (1) is skipped; only (2) is live.
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].id, ObjectId::new(2));
+    }
+
+    #[test]
+    fn sampled_at_picks_up_per_object_animation_state() {
+        let mut s = Scene::default();
+        let id = ObjectId::new(7);
+        s.objects.push(SceneObject {
+            id,
+            kind: ObjectKind::Shape(Shape::Rect {
+                width: 10.0,
+                height: 10.0,
+                fill: 0,
+                stroke: None,
+                corner_radius: 0.0,
+            }),
+            transform: Transform {
+                position: (1.0, 2.0),
+                ..Transform::identity()
+            },
+            animations: vec![Animation::new(
+                AnimatedProperty::Position,
+                vec![
+                    Keyframe {
+                        time: 0,
+                        value: KeyframeValue::Vec2(10.0, 20.0),
+                        easing: None,
+                    },
+                    Keyframe {
+                        time: 100,
+                        value: KeyframeValue::Vec2(10.0, 20.0),
+                        easing: None,
+                    },
+                ],
+                Easing::Linear,
+                Repeat::Once,
+            )],
+            ..SceneObject::default()
+        });
+        let samples = s.sampled_at(50);
+        assert_eq!(samples.len(), 1);
+        // Base (1,2) + animation (10,20) = (11,22).
+        assert!((samples[0].transform.position.0 - 11.0).abs() < 1e-4);
+        assert!((samples[0].transform.position.1 - 22.0).abs() < 1e-4);
     }
 }

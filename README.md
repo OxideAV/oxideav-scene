@@ -219,6 +219,18 @@ to walk the object list by hand:
   ties broken by later insertion. AABB-only — a rotated rect's
   AABB contains corners the rect itself does not, so a
   per-pixel picker layered on top of this remains a follow-up.
+- `SceneObject::effective_transform_at(t)` /
+  `effective_opacity_at(t)` compose the object's base `Transform`
+  and `opacity` with any `Position` / `Scale` / `Rotation` /
+  `Skew` / `Anchor` / `Opacity` `Animation` tracks evaluated at
+  `t`. Position / rotation / skew add, scale multiplies, anchor
+  replaces, opacity multiplies and clamps to `0.0..=1.0`.
+- `SceneObject::sample_at(t)` returns a `Sample` carrying
+  `(id, z_order, transform, opacity, blend_mode, clip)` — the
+  per-frame view a renderer needs without re-running the keyframe
+  evaluator itself. `Scene::sampled_at(t)` produces one `Sample`
+  per live object in paint order (z ascending, ties broken by
+  insertion).
 
 ### AudioCue
 

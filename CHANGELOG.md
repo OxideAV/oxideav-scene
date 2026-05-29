@@ -77,6 +77,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic property-test suite (`tests/transform_props.rs`):
   identity no-op, helper/matrix agreement, AABB corner-containment +
   tightness, rotation area lower-bound, and translation commutativity.
+- `SceneObject::evaluate_property_at(t, prop)` — raw lookup of the
+  first matching `Animation` track's `KeyframeValue` at scene time `t`.
+  `None` when no track targets `prop` or when the track has no
+  keyframes; the second of two same-property tracks is shadowed.
+- `SceneObject::effective_transform_at(t)` — base `Transform`
+  composed with `Position` / `Scale` / `Rotation` / `Skew` / `Anchor`
+  animation tracks evaluated at `t`. Per-property rule: `Position` +
+  `Rotation` + `Skew` add to base, `Scale` multiplies, `Anchor`
+  replaces. Variant mismatches (e.g. a `Scalar` keyframe on a
+  `Position` track) leave the base value alone.
+- `SceneObject::effective_opacity_at(t)` — base `opacity` multiplied
+  by any `Opacity` animation track's `Scalar` value at `t`, then
+  clamped to `0.0..=1.0` so the result is compositor-safe.
+- `SceneObject::sample_at(t)` / `Scene::sampled_at(t)` — per-frame
+  resolved state. `sample_at` returns the new `Sample` struct
+  carrying `(id, z_order, transform, opacity, blend_mode, clip)` —
+  the renderer's flat per-object view. `Scene::sampled_at(t)`
+  collects every live object's `Sample` in paint order (z ascending,
+  ties broken by insertion). `Sample` is re-exported at the crate
+  root.
 
 
 ## [0.1.3](https://github.com/OxideAV/oxideav-scene/compare/v0.1.2...v0.1.3) - 2026-05-04

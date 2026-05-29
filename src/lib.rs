@@ -73,7 +73,7 @@ pub use duration::{Lifetime, SceneDuration, TimeStamp};
 pub use id::ObjectId;
 pub use object::{
     BlendMode, Canvas, ClipRect, Effect, ImageSource, LengthUnit, LiveStreamHandle, ObjectKind,
-    SceneObject, Shape, TextRun, Transform, VideoSource,
+    Sample, SceneObject, Shape, TextRun, Transform, VideoSource,
 };
 pub use ops::{ExportOp, Operation};
 pub use page::Page;

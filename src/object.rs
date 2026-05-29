@@ -190,6 +190,152 @@ impl SceneObject {
             Some(clip) => intersect_rect(bb, clip),
         }
     }
+
+    /// Find the *first* animation track on this object whose
+    /// [`AnimatedProperty`](crate::animation::AnimatedProperty) matches
+    /// `prop` and sample it at scene time `t`. Returns the raw
+    /// [`KeyframeValue`](crate::animation::KeyframeValue) the track
+    /// emits — no merging with the object's base
+    /// [`Transform`] / [`opacity`](Self::opacity) is performed here.
+    ///
+    /// Returns `None` when the object carries no track for `prop` or
+    /// when the matching track has no keyframes. Tracks are searched
+    /// in insertion order; if two tracks animate the same property
+    /// (currently allowed by
+    /// [`Operation::Animate`](crate::ops::Operation::Animate)) only
+    /// the first is consulted — the second is effectively shadowed
+    /// until a [`CancelAnimation`](crate::ops::Operation::CancelAnimation)
+    /// removes the leader.
+    pub fn evaluate_property_at(
+        &self,
+        t: crate::duration::TimeStamp,
+        prop: &crate::animation::AnimatedProperty,
+    ) -> Option<crate::animation::KeyframeValue> {
+        let anim = self.animations.iter().find(|a| &a.property == prop)?;
+        anim.sample(t)
+    }
+
+    /// Compose the object's base [`Transform`] with any
+    /// [`Position`](crate::animation::AnimatedProperty::Position) /
+    /// [`Scale`](crate::animation::AnimatedProperty::Scale) /
+    /// [`Rotation`](crate::animation::AnimatedProperty::Rotation) /
+    /// [`Skew`](crate::animation::AnimatedProperty::Skew) /
+    /// [`Anchor`](crate::animation::AnimatedProperty::Anchor)
+    /// animation tracks evaluated at scene time `t`.
+    ///
+    /// Composition rule (per property):
+    ///
+    /// - `Position` (Vec2) — *added* to base `position`. Animations
+    ///   are offsets from the base, matching the documented
+    ///   `Operation::SetTransform` semantics ("animations on the
+    ///   same object continue to add to this base").
+    /// - `Scale` (Vec2) — *multiplied* with base `scale`. Matches the
+    ///   convention used by After Effects / Lottie scale tracks.
+    /// - `Rotation` (Scalar, radians) — *added* to base `rotation`.
+    /// - `Skew` (Vec2, radians) — *added* to base `skew`.
+    /// - `Anchor` (Vec2, normalised 0..=1) — *replaces* base `anchor`.
+    ///   Anchors are pivot points, not deltas, so addition would be
+    ///   meaningless; the animated value is used verbatim.
+    ///
+    /// Variant mismatches between the base field type and the track's
+    /// [`KeyframeValue`] (e.g. an `Animation` on `Position` carrying a
+    /// `Scalar`) are silently ignored — the base value passes
+    /// through. Animation tracks targeting non-transform properties
+    /// (`Opacity`, `Volume`, `EffectParam`, `Custom`) are likewise
+    /// ignored by this method.
+    pub fn effective_transform_at(&self, t: crate::duration::TimeStamp) -> Transform {
+        use crate::animation::{AnimatedProperty as P, KeyframeValue as V};
+        let mut out = self.transform;
+        for prop in [P::Position, P::Scale, P::Rotation, P::Skew, P::Anchor] {
+            let Some(v) = self.evaluate_property_at(t, &prop) else {
+                continue;
+            };
+            match (prop, v) {
+                (P::Position, V::Vec2(dx, dy)) => {
+                    out.position = (out.position.0 + dx, out.position.1 + dy);
+                }
+                (P::Scale, V::Vec2(sx, sy)) => {
+                    out.scale = (out.scale.0 * sx, out.scale.1 * sy);
+                }
+                (P::Rotation, V::Scalar(r)) => {
+                    out.rotation += r;
+                }
+                (P::Skew, V::Vec2(kx, ky)) => {
+                    out.skew = (out.skew.0 + kx, out.skew.1 + ky);
+                }
+                (P::Anchor, V::Vec2(ax, ay)) => {
+                    out.anchor = (ax, ay);
+                }
+                _ => {} // variant mismatch — base value passes through.
+            }
+        }
+        out
+    }
+
+    /// Compose the object's base [`opacity`](Self::opacity) with any
+    /// [`Opacity`](crate::animation::AnimatedProperty::Opacity)
+    /// animation track evaluated at scene time `t`.
+    ///
+    /// The animated value *multiplies* the base — a base of `0.5` and
+    /// an animated `Scalar(0.5)` yields `0.25`. The result is clamped
+    /// to `0.0..=1.0` so the caller can hand it straight to a
+    /// compositor's alpha channel without re-clamping.
+    ///
+    /// Variant mismatches (a non-`Scalar` keyframe on an `Opacity`
+    /// track) are ignored — the base value passes through clamped.
+    pub fn effective_opacity_at(&self, t: crate::duration::TimeStamp) -> f32 {
+        use crate::animation::{AnimatedProperty as P, KeyframeValue as V};
+        let base = self.opacity;
+        let factor = match self.evaluate_property_at(t, &P::Opacity) {
+            Some(V::Scalar(v)) => v,
+            _ => 1.0,
+        };
+        (base * factor).clamp(0.0, 1.0)
+    }
+
+    /// Evaluate every animation track on this object at scene time
+    /// `t` and return a [`Sample`] carrying the resolved transform +
+    /// opacity. The object's `kind`, `z_order`, `blend_mode`, `clip`
+    /// and `id` are forwarded verbatim from `self`.
+    ///
+    /// This is the single-call entry point a renderer uses per object
+    /// per frame: it hides the per-property dispatch and produces a
+    /// pre-merged state that can be fed straight to the compositor.
+    pub fn sample_at(&self, t: crate::duration::TimeStamp) -> Sample {
+        Sample {
+            id: self.id,
+            z_order: self.z_order,
+            transform: self.effective_transform_at(t),
+            opacity: self.effective_opacity_at(t),
+            blend_mode: self.blend_mode,
+            clip: self.clip,
+        }
+    }
+}
+
+/// Per-object resolved state at a single scene time. Produced by
+/// [`SceneObject::sample_at`] (and [`crate::Scene::sampled_at`]) so
+/// renderers consume a flat, animation-merged view of each visible
+/// object rather than threading [`Animation`](crate::animation::Animation)
+/// evaluation through their own pipeline.
+///
+/// The forwarded fields (`id`, `z_order`, `blend_mode`, `clip`) come
+/// from the source [`SceneObject`] unchanged; `transform` is the
+/// composed base + animation-track result (see
+/// [`SceneObject::effective_transform_at`]); `opacity` is the
+/// composed + clamped value from
+/// [`SceneObject::effective_opacity_at`]. The object's `kind` is not
+/// inlined here — the renderer typically already holds the source
+/// [`SceneObject`] for that and inlining `kind` would defeat the
+/// "cheap to clone per frame" goal of this struct.
+#[derive(Clone, Copy, Debug)]
+pub struct Sample {
+    pub id: ObjectId,
+    pub z_order: i32,
+    pub transform: Transform,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+    pub clip: Option<ClipRect>,
 }
 
 /// Intersect the transformed-object AABB with a [`ClipRect`] given
@@ -772,5 +918,262 @@ mod tests {
         };
         let bb = obj.bbox((0.0, 0.0));
         assert!(bb.width <= 0.0 || bb.height <= 0.0);
+    }
+
+    // ----- effective_transform_at / effective_opacity_at / sample_at -----
+
+    use crate::animation::{
+        AnimatedProperty as P, Animation, Easing, Keyframe, KeyframeValue as V, Repeat,
+    };
+
+    fn scalar_anim(prop: P, kf: &[(crate::duration::TimeStamp, f32)]) -> Animation {
+        Animation::new(
+            prop,
+            kf.iter()
+                .map(|(t, v)| Keyframe {
+                    time: *t,
+                    value: V::Scalar(*v),
+                    easing: None,
+                })
+                .collect(),
+            Easing::Linear,
+            Repeat::Once,
+        )
+    }
+
+    fn vec2_anim(prop: P, kf: &[(crate::duration::TimeStamp, (f32, f32))]) -> Animation {
+        Animation::new(
+            prop,
+            kf.iter()
+                .map(|(t, (x, y))| Keyframe {
+                    time: *t,
+                    value: V::Vec2(*x, *y),
+                    easing: None,
+                })
+                .collect(),
+            Easing::Linear,
+            Repeat::Once,
+        )
+    }
+
+    #[test]
+    fn evaluate_property_at_returns_none_without_track() {
+        let obj = SceneObject::default();
+        assert!(obj.evaluate_property_at(0, &P::Opacity).is_none());
+    }
+
+    #[test]
+    fn evaluate_property_at_returns_raw_keyframe_value() {
+        let obj = SceneObject {
+            animations: vec![scalar_anim(P::Opacity, &[(0, 0.0), (100, 1.0)])],
+            ..SceneObject::default()
+        };
+        let v = obj.evaluate_property_at(50, &P::Opacity).unwrap();
+        match v {
+            V::Scalar(s) => assert!((s - 0.5).abs() < 1e-4),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn effective_transform_with_no_animation_is_base() {
+        let obj = SceneObject {
+            transform: Transform {
+                position: (10.0, 20.0),
+                scale: (2.0, 3.0),
+                rotation: 0.5,
+                anchor: (0.25, 0.75),
+                skew: (0.1, 0.2),
+            },
+            ..SceneObject::default()
+        };
+        assert_eq!(obj.effective_transform_at(123), obj.transform);
+    }
+
+    #[test]
+    fn position_track_adds_to_base() {
+        let obj = SceneObject {
+            transform: Transform {
+                position: (5.0, 7.0),
+                ..Transform::identity()
+            },
+            animations: vec![vec2_anim(
+                P::Position,
+                &[(0, (10.0, 20.0)), (100, (10.0, 20.0))],
+            )],
+            ..SceneObject::default()
+        };
+        let t = obj.effective_transform_at(50);
+        assert!((t.position.0 - 15.0).abs() < 1e-4);
+        assert!((t.position.1 - 27.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn scale_track_multiplies_with_base() {
+        let obj = SceneObject {
+            transform: Transform {
+                scale: (2.0, 3.0),
+                ..Transform::identity()
+            },
+            animations: vec![vec2_anim(P::Scale, &[(0, (1.5, 2.0)), (100, (1.5, 2.0))])],
+            ..SceneObject::default()
+        };
+        let t = obj.effective_transform_at(50);
+        assert!((t.scale.0 - 3.0).abs() < 1e-4);
+        assert!((t.scale.1 - 6.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn rotation_track_adds_to_base() {
+        let obj = SceneObject {
+            transform: Transform {
+                rotation: 1.0,
+                ..Transform::identity()
+            },
+            animations: vec![scalar_anim(P::Rotation, &[(0, 0.5), (100, 0.5)])],
+            ..SceneObject::default()
+        };
+        assert!((obj.effective_transform_at(50).rotation - 1.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn skew_track_adds_to_base() {
+        let obj = SceneObject {
+            transform: Transform {
+                skew: (0.2, 0.3),
+                ..Transform::identity()
+            },
+            animations: vec![vec2_anim(P::Skew, &[(0, (0.1, -0.1)), (100, (0.1, -0.1))])],
+            ..SceneObject::default()
+        };
+        let t = obj.effective_transform_at(50);
+        assert!((t.skew.0 - 0.3).abs() < 1e-4);
+        assert!((t.skew.1 - 0.2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn anchor_track_replaces_base() {
+        let obj = SceneObject {
+            transform: Transform {
+                anchor: (0.5, 0.5),
+                ..Transform::identity()
+            },
+            animations: vec![vec2_anim(
+                P::Anchor,
+                &[(0, (0.25, 0.75)), (100, (0.25, 0.75))],
+            )],
+            ..SceneObject::default()
+        };
+        let t = obj.effective_transform_at(50);
+        assert!((t.anchor.0 - 0.25).abs() < 1e-4);
+        assert!((t.anchor.1 - 0.75).abs() < 1e-4);
+    }
+
+    #[test]
+    fn variant_mismatch_on_transform_track_falls_through() {
+        // Position expects Vec2; feeding it a Scalar is a no-op.
+        let obj = SceneObject {
+            transform: Transform {
+                position: (3.0, 4.0),
+                ..Transform::identity()
+            },
+            animations: vec![scalar_anim(P::Position, &[(0, 99.0), (100, 99.0)])],
+            ..SceneObject::default()
+        };
+        let t = obj.effective_transform_at(50);
+        assert!((t.position.0 - 3.0).abs() < 1e-4);
+        assert!((t.position.1 - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn effective_opacity_no_track_is_base() {
+        let obj = SceneObject {
+            opacity: 0.7,
+            ..SceneObject::default()
+        };
+        assert!((obj.effective_opacity_at(0) - 0.7).abs() < 1e-4);
+    }
+
+    #[test]
+    fn effective_opacity_multiplies_and_clamps() {
+        let obj = SceneObject {
+            opacity: 0.8,
+            animations: vec![scalar_anim(P::Opacity, &[(0, 0.5), (100, 0.5)])],
+            ..SceneObject::default()
+        };
+        // 0.8 * 0.5 = 0.4
+        assert!((obj.effective_opacity_at(50) - 0.4).abs() < 1e-4);
+    }
+
+    #[test]
+    fn effective_opacity_clamps_to_unit_range() {
+        // Base 1.0 * animated 2.0 would be 2.0; should clamp to 1.0.
+        let obj = SceneObject {
+            opacity: 1.0,
+            animations: vec![scalar_anim(P::Opacity, &[(0, 2.0), (100, 2.0)])],
+            ..SceneObject::default()
+        };
+        assert!((obj.effective_opacity_at(50) - 1.0).abs() < 1e-4);
+
+        // Negative animated value would yield negative; should clamp to 0.0.
+        let obj = SceneObject {
+            opacity: 0.5,
+            animations: vec![scalar_anim(P::Opacity, &[(0, -1.0), (100, -1.0)])],
+            ..SceneObject::default()
+        };
+        assert!(obj.effective_opacity_at(50).abs() < 1e-4);
+    }
+
+    #[test]
+    fn sample_at_forwards_compositor_fields() {
+        let obj = SceneObject {
+            id: ObjectId::new(42),
+            opacity: 0.5,
+            z_order: 7,
+            blend_mode: BlendMode::Screen,
+            clip: Some(ClipRect {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            }),
+            transform: Transform {
+                position: (10.0, 20.0),
+                ..Transform::identity()
+            },
+            animations: vec![scalar_anim(P::Opacity, &[(0, 0.5), (100, 0.5)])],
+            ..SceneObject::default()
+        };
+        let s = obj.sample_at(50);
+        assert_eq!(s.id, ObjectId::new(42));
+        assert_eq!(s.z_order, 7);
+        assert_eq!(s.blend_mode, BlendMode::Screen);
+        assert!(s.clip.is_some());
+        assert!((s.opacity - 0.25).abs() < 1e-4); // 0.5 * 0.5
+        assert!((s.transform.position.0 - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn multiple_transform_tracks_compose_independently() {
+        let obj = SceneObject {
+            transform: Transform {
+                position: (1.0, 1.0),
+                scale: (1.0, 1.0),
+                rotation: 0.1,
+                ..Transform::identity()
+            },
+            animations: vec![
+                vec2_anim(P::Position, &[(0, (4.0, 5.0)), (100, (4.0, 5.0))]),
+                scalar_anim(P::Rotation, &[(0, 0.4), (100, 0.4)]),
+                vec2_anim(P::Scale, &[(0, (3.0, 4.0)), (100, (3.0, 4.0))]),
+            ],
+            ..SceneObject::default()
+        };
+        let t = obj.effective_transform_at(50);
+        assert!((t.position.0 - 5.0).abs() < 1e-4); // 1+4
+        assert!((t.position.1 - 6.0).abs() < 1e-4); // 1+5
+        assert!((t.scale.0 - 3.0).abs() < 1e-4); // 1*3
+        assert!((t.scale.1 - 4.0).abs() < 1e-4); // 1*4
+        assert!((t.rotation - 0.5).abs() < 1e-4); // 0.1+0.4
     }
 }
