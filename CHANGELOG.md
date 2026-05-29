@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `RasterRenderer` — a concrete `SceneRenderer` (in
+  `src/raster_renderer.rs`, re-exported at the crate root) that walks
+  `Scene::sampled_at(t)` in paint order and composites the vector slice
+  of a scene into an RGBA8 `oxideav_core::VideoFrame` via
+  `oxideav_raster::Renderer`. Handles backgrounds (`Solid`,
+  `Transparent`, two-colour `LinearGradient`, multi-stop
+  `Background::Gradient` linear + radial), `ObjectKind::Shape`
+  (`Rect` with corner radius, `Polygon`), and `ObjectKind::Vector`
+  (root group inlined under the object transform). Honours each
+  object's animation-merged `Transform` (lowered via
+  `Transform::to_matrix`), `opacity` (group alpha), and `clip` rect
+  (group clip path). `Image` / `Video` / `Live` / `Text` / `Group`
+  kinds and `Shape::Path` (opaque SVG data) are skipped without error
+  pending a font-registry / decoder-aware renderer. `Canvas::Vector`
+  scenes are rejected with `Error::Unsupported`. `RasterRenderer::seek`
+  is a no-op (the renderer rebuilds each frame from scratch).
+  `RasterRenderer::build_frame(scene, t)` exposes the intermediate
+  `VectorFrame` for callers that want the vector tree without
+  rasterising. Covered by 11 unit tests + `tests/raster_render.rs`
+  (background + layered shapes, finite-scene drive via
+  `RenderedSource`, animated-opacity coverage ramp).
 - `Shape::content_size()` — object-local `(width, height)` for the
   shape's filled geometry. `Rect` reports its declared dims; `Polygon`
   reports the AABB of its `points` (empty polygon → `(0, 0)`); `Path`

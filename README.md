@@ -25,14 +25,25 @@ Zero C dependencies — pure Rust, same rules as the rest of oxideav.
 
 ## Status
 
-**Scaffold.** This crate ships the type model + public-API shape for
-all three use cases and a placeholder `SceneRenderer` trait. No real
-rendering, encoding, or file-format I/O yet — those land as follow-ups.
+**Type model complete; vector renderer landed.** This crate ships the
+type model + public-API shape for all three use cases, plus two concrete
+renderers. Encoding and file-format I/O are still follow-ups.
 
 - `Scene`, `SceneObject`, `ObjectKind`, `Transform`, `Animation`,
   `Keyframe`, `Easing`, `AudioCue` types are in place.
-- `SceneRenderer` + `SceneSampler` traits are defined but return
-  `Error::Unsupported` on every call.
+- `RasterRenderer` is a concrete `SceneRenderer`: it walks
+  `Scene::sampled_at(t)` in paint order and composites the **vector
+  slice** of a scene — backgrounds (solid / transparent / linear +
+  radial gradient), `Shape` objects (rect with corner radius, polygon),
+  and `ObjectKind::Vector` frames — into an RGBA8 `VideoFrame` via
+  `oxideav_raster::Renderer`, honouring each object's
+  animation-merged transform, opacity, and clip rect. Resource-backed
+  kinds (image / video / live / text / group) are skipped pending a
+  font-registry / decoder-aware renderer. `Canvas::Vector` scenes are
+  rejected with `Error::Unsupported` (they export their `VectorFrame`
+  directly without rasterisation).
+- `SceneRenderer` + `SceneSampler` traits are defined; `StubRenderer`
+  remains as the always-`Error::Unsupported` placeholder.
 - `Paint` + `Gradient` typed paint patterns (multi-stop linear /
   radial) land in [`paint`], with `Background::Gradient(_)` exposing
   them as a richer alternative to the legacy two-colour
@@ -260,8 +271,25 @@ Scene + t  →  SceneSampler.sample_at(t)  →  RenderedFrame {
 
 A `SceneRenderer` walks the `SceneObject` list in z-order, evaluating
 transforms + animations at `t`, clipping against the canvas, and
-compositing via the `BlendMode`. The renderer delegates per-object
-content fetching to each `ObjectKind`'s own sampler:
+compositing via the `BlendMode`. `RasterRenderer` implements this for
+the vector slice today:
+
+```rust
+use oxideav_scene::{Background, Canvas, RasterRenderer, Scene, SceneRenderer};
+
+let scene = Scene {
+    canvas: Canvas::raster(1920, 1080),
+    background: Background::Solid(0x101820FF),
+    ..Scene::default()
+};
+let mut renderer = RasterRenderer::new();
+renderer.prepare(&scene).unwrap();
+let frame = renderer.render_at(&scene, 0).unwrap();
+// frame.video is Some(VideoFrame) — an RGBA8 plane at the canvas size.
+```
+
+The renderer delegates per-object content fetching to each
+`ObjectKind`'s own sampler:
 
 ## Source / Sink
 
@@ -388,11 +416,15 @@ src/
 ├── animation.rs     — Animation + Keyframe + Easing + interpolation
 ├── audio.rs         — AudioCue + AudioSource
 ├── render.rs        — SceneRenderer + SceneSampler traits + StubRenderer
+├── raster_renderer.rs — RasterRenderer: concrete SceneRenderer (bg + shapes + vector frames → RGBA)
+├── raster.rs        — rasterize_vector(): VectorFrame → VideoFrame via oxideav-raster
+├── text.rs          — TextRenderer: TextRun → RGBA via oxideav-scribe + oxideav-raster
 ├── source.rs        — SceneSource + SceneSink + drive() + RenderedSource + NullSink / FnSink
 ├── adapt.rs         — pixel-format adaptation (inbound + outbound, via oxideav-pixfmt)
 ├── duration.rs      — SceneDuration + Lifetime
 ├── id.rs            — ObjectId (stable, editable)
 ├── ops.rs           — Operation enum for the streaming compositor
+├── page.rs          — Page (paged-content / PDF mode)
 └── paint.rs         — Paint + Gradient (multi-stop linear / radial)
 ```
 

@@ -1,14 +1,26 @@
 //! A time-based composition model for oxideav.
 //!
 //! The type surface (scene, objects, animations, time-base) is in
-//! place. The full [`SceneRenderer`] driver is still a stub
-//! ([`StubRenderer`] returns `Error::Unsupported`); concrete
-//! per-object rendering lands here piecemeal. The first real piece
-//! is [`text::TextRenderer`] — it composites a [`TextRun`] onto a
-//! straight-alpha RGBA framebuffer via [`oxideav_scribe`] (TrueType
-//! shaping + scanline rasterisation). The caller supplies the
-//! [`oxideav_scribe::Face`]; scene-level font discovery is out of
-//! scope.
+//! place, and concrete per-object rendering lands here piecemeal.
+//! [`StubRenderer`] remains as the always-`Error::Unsupported`
+//! placeholder for downstream code that only needs the trait shape.
+//!
+//! Two concrete renderers exist:
+//!
+//! - [`text::TextRenderer`] composites a single [`TextRun`] onto a
+//!   straight-alpha RGBA framebuffer via [`oxideav_scribe`] (TrueType
+//!   shaping + scanline rasterisation). The caller supplies the
+//!   [`oxideav_scribe::Face`]; scene-level font discovery is out of
+//!   scope.
+//! - [`raster_renderer::RasterRenderer`] implements the full
+//!   [`SceneRenderer`] driver: it walks [`Scene::sampled_at`] in paint
+//!   order and composites the *vector* slice of a scene — backgrounds,
+//!   [`object::Shape`]s, and [`ObjectKind::Vector`] objects — into an
+//!   RGBA8 [`oxideav_core::VideoFrame`] through
+//!   [`oxideav_raster::Renderer`], honouring per-object transform,
+//!   opacity, and clip. Resource-backed kinds (image / video / live /
+//!   text / group) are skipped pending a font-registry / decoder-aware
+//!   renderer.
 //!
 //! See [`README.md`](../README.md) for the full design + the three
 //! target use cases (PDF pages, RTMP streaming compositor, NLE
@@ -43,8 +55,9 @@
 //! - [`AudioCue`] — timeline-triggered audio with an animated volume
 //!   envelope.
 //! - [`SceneRenderer`] / [`SceneSampler`] — traits the renderer
-//!   implements. Current default ([`StubRenderer`]) always returns
-//!   `Error::Unsupported`.
+//!   implements. [`raster_renderer::RasterRenderer`] is the concrete
+//!   driver for the vector slice; [`StubRenderer`] is the
+//!   always-`Error::Unsupported` placeholder.
 
 pub mod adapt;
 pub mod animation;
@@ -61,6 +74,7 @@ pub mod paint;
 // here too. The `raster` cargo feature is preserved as a no-op for
 // back-compat.
 pub mod raster;
+pub mod raster_renderer;
 pub mod render;
 pub mod scene;
 pub mod source;
@@ -79,6 +93,7 @@ pub use ops::{ExportOp, Operation};
 pub use page::Page;
 pub use paint::{Gradient, Paint, Stop};
 pub use raster::rasterize_vector;
+pub use raster_renderer::RasterRenderer;
 pub use render::{RenderedFrame, SceneRenderer, SceneSampler, StubRenderer};
 pub use scene::{Background, Metadata, Scene};
 pub use source::{drive, FnSink, NullSink, RenderedSource, SceneSink, SceneSource, SourceFormat};
