@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-scene/compare/v0.1.3...v0.1.4) - 2026-05-29
+
+### Other
+
+- RasterRenderer — concrete SceneRenderer for the vector slice
+- per-frame Sample + animation-track composition helpers
+- per-object + scene-wide AABB queries (bbox, hit_test)
+- typed matrix lowering + axis-aligned bbox accessors
+- typed paint patterns + Scene::apply / merge driver APIs
+- drop committed Cargo.lock + relax oxideav-core to "0.1"
+
 ### Added
 
 - `RasterRenderer` — a concrete `SceneRenderer` (in
