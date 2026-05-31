@@ -34,14 +34,25 @@ renderers. Encoding and file-format I/O are still follow-ups.
 - `RasterRenderer` is a concrete `SceneRenderer`: it walks
   `Scene::sampled_at(t)` in paint order and composites the **vector
   slice** of a scene — backgrounds (solid / transparent / linear +
-  radial gradient), `Shape` objects (rect with corner radius, polygon),
-  and `ObjectKind::Vector` frames — into an RGBA8 `VideoFrame` via
+  radial gradient), `Shape` objects (rect with corner radius, polygon,
+  **SVG-`path`-data**), `ObjectKind::Vector` frames, and
+  **`ObjectKind::Group`** containers (children resolved by id and
+  inlined under the group's transform / opacity / clip; cycles
+  terminated; missing ids dropped) — into an RGBA8 `VideoFrame` via
   `oxideav_raster::Renderer`, honouring each object's
   animation-merged transform, opacity, and clip rect. Resource-backed
-  kinds (image / video / live / text / group) are skipped pending a
+  kinds (image / video / live / text) are skipped pending a
   font-registry / decoder-aware renderer. `Canvas::Vector` scenes are
   rejected with `Error::Unsupported` (they export their `VectorFrame`
   directly without rasterisation).
+- `svg_path::parse_path` / `parse_svg_path` (re-exported at the crate
+  root) lowers an SVG 1.1 path-data string into an
+  `oxideav_core::Path`. The supported commands are `M / m`, `L / l`,
+  `H / h`, `V / v`, `C / c`, `S / s`, `Q / q`, `T / t`, `Z / z` — i.e.
+  everything `oxideav_core::Path` can express. Arc (`A / a`) lowering
+  is deferred (it needs a cubic-spline approximation pass). The
+  parser feeds `Shape::Path` rendering and `Shape::content_size`
+  bbox queries.
 - `SceneRenderer` + `SceneSampler` traits are defined; `StubRenderer`
   remains as the always-`Error::Unsupported` placeholder.
 - `Paint` + `Gradient` typed paint patterns (multi-stop linear /

@@ -610,10 +610,12 @@ impl Shape {
     ///   *inside* the box.
     /// - [`Shape::Polygon`] reports the bounding box of its `points`
     ///   list. An empty polygon reports `(0.0, 0.0)`.
-    /// - [`Shape::Path`] is not parsed here — the SVG `data` string
-    ///   is opaque to this crate. Returns `None`; callers either
-    ///   parse the data themselves or supply a fallback content
-    ///   size to [`SceneObject::bbox`].
+    /// - [`Shape::Path`] is parsed by [`crate::svg_path::parse_bbox`]
+    ///   and reports the AABB of every anchor / control point. This is
+    ///   the convex-hull-of-control-points superset of the painted
+    ///   curve (an exact tight bound would walk the derivative roots);
+    ///   it is what scene-layer layout queries actually want. Returns
+    ///   `None` for empty / unparseable data.
     ///
     /// Stroke half-widths are NOT included; the bounds reflect the
     /// filled geometry only. A rasteriser that needs the stroked
@@ -635,7 +637,11 @@ impl Shape {
                 }
                 Some(((max_x - min_x).max(0.0), (max_y - min_y).max(0.0)))
             }
-            Shape::Path { .. } => None,
+            Shape::Path { data, .. } => {
+                crate::svg_path::parse_bbox(data).map(|(min_x, min_y, max_x, max_y)| {
+                    ((max_x - min_x).max(0.0), (max_y - min_y).max(0.0))
+                })
+            }
         }
     }
 }
@@ -792,9 +798,32 @@ mod tests {
     }
 
     #[test]
-    fn shape_path_extent_is_opaque() {
+    fn shape_path_extent_is_parsed_aabb() {
         let s = Shape::Path {
             data: "M10,10 L20,20".to_string(),
+            fill: 0,
+            stroke: None,
+        };
+        // AABB of (10,10)..(20,20) → 10x10 extent.
+        assert_eq!(s.content_size(), Some((10.0, 10.0)));
+    }
+
+    #[test]
+    fn shape_path_unparseable_returns_none() {
+        let s = Shape::Path {
+            data: "totally-not-a-path".to_string(),
+            fill: 0,
+            stroke: None,
+        };
+        assert!(s.content_size().is_none());
+    }
+
+    #[test]
+    fn shape_path_arc_returns_none_for_now() {
+        // The svg_path parser deliberately rejects arc commands; the
+        // bbox query treats that as "no usable bound."
+        let s = Shape::Path {
+            data: "M0,0 A 5 5 0 0 0 10 10".to_string(),
             fill: 0,
             stroke: None,
         };

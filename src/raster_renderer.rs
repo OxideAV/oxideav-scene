@@ -19,12 +19,19 @@
 //! * [`Background`] — `Solid`, `Transparent`, two-colour `LinearGradient`,
 //!   and the multi-stop [`Background::Gradient`] (linear + radial).
 //! * [`ObjectKind::Shape`] — `Rect` (with corner radius), `Polygon`, and
-//!   `Path` (SVG path data is *not* parsed here — see below).
+//!   `Path` (SVG path data parsed via [`crate::svg_path::parse_path`];
+//!   unparseable data — including arcs — is skipped without error).
 //! * [`ObjectKind::Vector`] — the carried [`oxideav_core::VectorFrame`]'s
 //!   root group is inlined under the object's transform.
+//! * [`ObjectKind::Group`] — child object ids are resolved against the
+//!   scene and inlined under the group's own `Transform` / `opacity` /
+//!   `clip` (composed multiplicatively over each child's own
+//!   sampled state). Cycles in the child graph are broken at the
+//!   second visit (each id rendered at most once per group expansion);
+//!   missing ids are silently dropped.
 //!
-//! The kinds that need a decoder, a font face, or child resolution are
-//! **skipped** (they contribute nothing to the frame, but never error):
+//! The kinds that need a decoder or a font face are **skipped** (they
+//! contribute nothing to the frame, but never error):
 //!
 //! * [`ObjectKind::Image`] / [`ObjectKind::Video`] / [`ObjectKind::Live`]
 //!   — need a decoder / live source the scene crate doesn't bind. A
@@ -33,12 +40,6 @@
 //! * [`ObjectKind::Text`] — needs a [`oxideav_scribe::Face`]; render it
 //!   with [`crate::text::TextRenderer`] and composite the result, or wait
 //!   for a font-registry-aware renderer.
-//! * [`ObjectKind::Group`] — its children are referenced by id and
-//!   resolved against the scene; group flattening is a follow-up.
-//!
-//! [`Shape::Path`] carries an opaque SVG `data` string the scene crate
-//! does not parse (mirroring [`Shape::content_size`] returning `None` for
-//! it). It is skipped until an SVG-path lowering helper lands.
 //!
 //! # Coordinate system
 //!
@@ -55,11 +56,15 @@ use oxideav_core::{
 };
 use oxideav_raster::Renderer;
 
+use std::collections::HashSet;
+
 use crate::duration::TimeStamp;
-use crate::object::{ObjectKind, Shape, Stroke};
+use crate::id::ObjectId;
+use crate::object::{ClipRect, ObjectKind, SceneObject, Shape, Stroke, Transform};
 use crate::paint::{Gradient, Stop};
 use crate::render::{RenderedFrame, SceneRenderer};
 use crate::scene::{Background, Scene};
+use crate::svg_path;
 
 /// Concrete renderer for the vector slice of a scene. See the module
 /// docs for the supported object kinds and the skip list.
@@ -112,25 +117,46 @@ impl RasterRenderer {
         // Objects in paint order (z ascending, ties by insertion). We
         // re-borrow each source object by id so we can reach its `kind`
         // payload (the flat `Sample` deliberately omits `kind`).
+        //
+        // Children listed inside any `ObjectKind::Group` are claimed by
+        // their parent group's expansion (see `lower_object`) and
+        // skipped at the top level so they don't paint twice.
+        let owned: HashSet<ObjectId> = scene
+            .objects
+            .iter()
+            .filter_map(|o| match &o.kind {
+                ObjectKind::Group(ids) => Some(ids.iter().copied()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        let ctx = LowerCtx {
+            scene,
+            t,
+            canvas: (w as f32, h as f32),
+        };
         for sample in scene.sampled_at(t) {
+            if owned.contains(&sample.id) {
+                continue;
+            }
             let Some(obj) = scene.objects.iter().find(|o| o.id == sample.id) else {
                 continue;
             };
-            let (cw, ch) = obj.content_size().unwrap_or((w as f32, h as f32));
-            let Some(content) = object_node(&obj.kind) else {
+            let mut visited = HashSet::new();
+            let Some(node) = lower_object(
+                &ctx,
+                obj,
+                SampledState {
+                    transform: sample.transform,
+                    opacity: sample.opacity,
+                    clip: sample.clip,
+                },
+                &mut visited,
+            ) else {
                 continue; // unsupported / resource-backed kind — skip.
             };
-            // Lower the animation-merged transform for this content box.
-            let matrix = sample.transform.to_matrix(cw, ch);
-            let clip = sample.clip.map(|c| rect_path(c.x, c.y, c.width, c.height));
-            let group = Group {
-                transform: matrix,
-                opacity: sample.opacity.clamp(0.0, 1.0),
-                clip,
-                children: vec![content],
-                cache_key: None,
-            };
-            root.children.push(Node::Group(group));
+            root.children.push(node);
         }
 
         Ok(VectorFrame {
@@ -225,29 +251,105 @@ fn background_node(bg: &Background, w: f32, h: f32) -> Option<Node> {
 // ObjectKind → Node
 // ---------------------------------------------------------------------------
 
-/// Lower a renderable [`ObjectKind`] into a vector [`Node`] in
-/// object-local space (transform is applied by the caller's wrapping
-/// group). Returns `None` for resource-backed / unparsed kinds — see the
-/// module-level skip list.
-fn object_node(kind: &ObjectKind) -> Option<Node> {
-    match kind {
-        ObjectKind::Shape(s) => shape_node(s),
-        ObjectKind::Vector(vf) => {
-            // Inline the vector frame's root group verbatim. Its own
-            // `view_box` (if any) is ignored — the object's `Transform`
-            // already places it in canvas space and the carried units
-            // are treated as canvas units, matching
-            // `ObjectKind::content_size` reporting the frame's raw
-            // viewport.
-            Some(Node::Group(vf.root.clone()))
-        }
-        // Resource-backed or child-referencing kinds: skipped.
-        ObjectKind::Image(_)
-        | ObjectKind::Video(_)
-        | ObjectKind::Text(_)
-        | ObjectKind::Live(_)
-        | ObjectKind::Group(_) => None,
+/// Per-frame context carried through the recursive object lowering —
+/// the scene + the sample time + the canvas size. Borrowed by every
+/// `lower_object` invocation, including the recursive group expansion,
+/// so children always agree on the scene under inspection.
+struct LowerCtx<'a> {
+    scene: &'a Scene,
+    t: TimeStamp,
+    canvas: (f32, f32),
+}
+
+/// Animation-merged per-object state — what the caller's `Sample`
+/// carries minus the bits `lower_object` doesn't need. Bundled into a
+/// struct so the recursive lowering function stays under
+/// `clippy::too_many_arguments`.
+struct SampledState {
+    transform: Transform,
+    opacity: f32,
+    clip: Option<ClipRect>,
+}
+
+/// Lower a renderable [`SceneObject`] into a vector [`Node`] wrapped in
+/// a single [`Group`] carrying the object's animation-merged transform,
+/// opacity, and clip. Returns `None` for resource-backed / fully-
+/// unparseable kinds — see the module-level skip list.
+///
+/// `state` is typically passed straight from the caller's `Sample`, but
+/// the recursive Group expansion (below) substitutes per-child sampled
+/// values so each child's own animations are honoured.
+///
+/// `visited` tracks object ids already expanded inside this top-level
+/// object's subtree so a `Group(vec![id])` that references itself or
+/// forms a cycle terminates after the first visit instead of recursing
+/// forever.
+fn lower_object(
+    ctx: &LowerCtx<'_>,
+    obj: &SceneObject,
+    state: SampledState,
+    visited: &mut HashSet<ObjectId>,
+) -> Option<Node> {
+    if !visited.insert(obj.id) {
+        return None; // cycle / repeated visit — drop.
     }
+    // Per-object content box: prefer the kind's intrinsic size, fall
+    // back to the canvas size (matching the pre-Group code path).
+    let (cw, ch) = obj.content_size().unwrap_or(ctx.canvas);
+    let matrix = state.transform.to_matrix(cw, ch);
+    let clip_path = state.clip.map(|c| rect_path(c.x, c.y, c.width, c.height));
+
+    let children = match &obj.kind {
+        ObjectKind::Shape(s) => match shape_node(s) {
+            Some(n) => vec![n],
+            None => return None,
+        },
+        ObjectKind::Vector(vf) => vec![Node::Group(vf.root.clone())],
+        ObjectKind::Group(ids) => {
+            let mut nodes = Vec::new();
+            for child_id in ids {
+                let Some(child) = ctx.scene.objects.iter().find(|o| &o.id == child_id) else {
+                    continue;
+                };
+                // Honour the child's own lifetime so a group does not
+                // promote dead children back into the frame.
+                if !child.lifetime.is_live_at(ctx.t) {
+                    continue;
+                }
+                let csample = child.sample_at(ctx.t);
+                let mut sub_visited = visited.clone();
+                if let Some(node) = lower_object(
+                    ctx,
+                    child,
+                    SampledState {
+                        transform: csample.transform,
+                        opacity: csample.opacity,
+                        clip: csample.clip,
+                    },
+                    &mut sub_visited,
+                ) {
+                    nodes.push(node);
+                }
+            }
+            if nodes.is_empty() {
+                return None;
+            }
+            nodes
+        }
+        // Resource-backed kinds: skipped (still need a decoder / font
+        // face binding).
+        ObjectKind::Image(_) | ObjectKind::Video(_) | ObjectKind::Text(_) | ObjectKind::Live(_) => {
+            return None
+        }
+    };
+
+    Some(Node::Group(Group {
+        transform: matrix,
+        opacity: state.opacity.clamp(0.0, 1.0),
+        clip: clip_path,
+        children,
+        cache_key: None,
+    }))
 }
 
 /// Lower a [`Shape`] into a filled (+ optionally stroked) [`Node`] in
@@ -284,10 +386,19 @@ fn shape_node(shape: &Shape) -> Option<Node> {
             path.close();
             Some(fill_stroke_node(path, *fill, stroke.as_ref()))
         }
-        // SVG path `data` is opaque to the scene crate (see
-        // `Shape::content_size`). Lowering it needs an SVG-path parser;
-        // skip until one is wired in.
-        Shape::Path { .. } => None,
+        Shape::Path { data, fill, stroke } => {
+            // Parse the SVG path-data string into the core `Path` IR.
+            // Unparseable input (including the unsupported arc command)
+            // is dropped — the renderer never errors a frame on a bad
+            // shape; the caller can validate with
+            // `crate::svg_path::parse_path` ahead of time if a hard
+            // failure is wanted.
+            let path = svg_path::parse_path(data).ok()?;
+            if path.commands.is_empty() {
+                return None;
+            }
+            Some(fill_stroke_node(path, *fill, stroke.as_ref()))
+        }
     }
 }
 

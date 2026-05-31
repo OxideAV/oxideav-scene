@@ -78,6 +78,7 @@ pub mod raster_renderer;
 pub mod render;
 pub mod scene;
 pub mod source;
+pub mod svg_path;
 pub mod text;
 
 pub use adapt::{adapt_frame_to, adapt_frame_to_canvas, AdaptedSource};
@@ -97,4 +98,5 @@ pub use raster_renderer::RasterRenderer;
 pub use render::{RenderedFrame, SceneRenderer, SceneSampler, StubRenderer};
 pub use scene::{Background, Metadata, Scene};
 pub use source::{drive, FnSink, NullSink, RenderedSource, SceneSink, SceneSource, SourceFormat};
+pub use svg_path::{parse_path as parse_svg_path, SvgPathError};
 pub use text::TextRenderer;

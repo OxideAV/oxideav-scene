@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `svg_path` module — minimal SVG 1.1 path-data parser
+  (`parse_path` → `oxideav_core::Path`, plus `parse_bbox` for an
+  AABB summary). Supports `M / m`, `L / l`, `H / h`, `V / v`,
+  `C / c`, `S / s`, `Q / q`, `T / t`, `Z / z` (everything
+  `oxideav_core::Path` can express). Arc commands (`A / a`) return
+  `SvgPathError::UnsupportedCommand` so callers can decide whether
+  to drop, log, or pre-flatten. Number lexer accepts integers,
+  signed decimals, leading- / trailing-dot decimals, and scientific
+  notation. Re-exported at the crate root as `parse_svg_path` +
+  `SvgPathError`. 18 unit tests cover commands, separators,
+  smooth-curve reflection, and the unsupported-arc / truncated-input
+  error paths.
+- `RasterRenderer` now lowers `Shape::Path` through `svg_path` —
+  parseable SVG paths render as filled (+ optionally stroked)
+  geometry; unparseable data (including arc commands) is skipped
+  without erroring the frame.
+- `Shape::content_size` reports the AABB of every anchor / control
+  point for `Shape::Path` (via `svg_path::parse_bbox`) instead of
+  returning `None`. The bound is the convex-hull-of-control-points
+  superset of the painted curve — a tighter bound would need to
+  walk the Bezier derivative roots, which scene-layer layout
+  queries don't need.
+- `RasterRenderer` resolves `ObjectKind::Group` containers — each
+  child id is looked up in the scene, the child is sampled at the
+  current time (so its own animations are honoured), and the
+  lowered child node is wrapped under the parent group's animation-
+  merged `Transform` / `opacity` / `clip`. Cycles in the child
+  graph are broken at the second visit (a visited-id set is forked
+  per child); missing ids are silently dropped; dead children
+  (`Lifetime::is_live_at(t) == false`) are excluded. Children
+  referenced from any group are claimed by their parent and skipped
+  at the top level so they don't paint twice. 5 integration tests
+  cover composition, opacity multiplication, missing-id tolerance,
+  cycle termination, and group-clip intersection.
+
 ## [0.1.4](https://github.com/OxideAV/oxideav-scene/compare/v0.1.3...v0.1.4) - 2026-05-29
 
 ### Other
