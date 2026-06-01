@@ -253,13 +253,53 @@ fn shape_path_svg_renders_as_filled_polygon() {
 }
 
 #[test]
-fn shape_path_with_arc_skips_without_error() {
-    // Arcs aren't supported; the renderer should drop the shape
-    // silently rather than erroring the whole frame.
+fn shape_path_arc_lowers_to_filled_arc_segment() {
+    // Quarter-circle wedge: pen at (0, 16), arc up-and-right to
+    // (16, 0) with rx = ry = 16, then close back through the origin.
+    // The fill should cover the lower-left wedge of a 16-radius circle
+    // centred at (16, 16). The parser turns this into an
+    // `PathCommand::ArcTo`, oxideav-raster's `flatten_arc_to_cubics`
+    // turns it into cubics, and the rasteriser fills the result.
     let arc_obj = SceneObject {
         id: ObjectId::new(1),
         kind: ObjectKind::Shape(Shape::Path {
-            data: "M0,0 A 5 5 0 0 0 10 10".to_string(),
+            data: "M 0 16 A 16 16 0 0 0 16 0 L 0 0 Z".to_string(),
+            fill: 0xFFFFFFFF,
+            stroke: None,
+        }),
+        ..SceneObject::default()
+    };
+    let mut scene = Scene {
+        canvas: Canvas::raster(32, 32),
+        background: Background::Solid(0x000000FF),
+        ..Scene::default()
+    };
+    scene.objects.push(arc_obj);
+
+    let mut r = RasterRenderer::new();
+    let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
+    let data = &frame.planes[0].data;
+    // Inside the wedge (well clear of the curve): white.
+    let inside = pixel(data, 32, 2, 2);
+    assert!(
+        inside[0] > 200 && inside[1] > 200 && inside[2] > 200,
+        "wedge interior should be white: {inside:?}"
+    );
+    // Far outside the wedge (top-right): the black backdrop is intact.
+    let outside = pixel(data, 32, 30, 30);
+    assert_eq!(outside, [0x00, 0x00, 0x00, 0xFF]);
+}
+
+#[test]
+fn shape_path_with_invalid_arc_flag_is_skipped() {
+    // A malformed arc flag (`2` instead of `0`/`1`) makes the parser
+    // bail; the renderer drops the whole shape rather than partially
+    // emitting it. Matches the existing "unparseable → skip silently"
+    // contract for any other bad path data.
+    let bad = SceneObject {
+        id: ObjectId::new(1),
+        kind: ObjectKind::Shape(Shape::Path {
+            data: "M 0 0 A 5 5 0 2 0 10 10".to_string(),
             fill: 0xFF0000FF,
             stroke: None,
         }),
@@ -270,11 +310,10 @@ fn shape_path_with_arc_skips_without_error() {
         background: Background::Transparent,
         ..Scene::default()
     };
-    scene.objects.push(arc_obj);
+    scene.objects.push(bad);
 
     let mut r = RasterRenderer::new();
     let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
-    // Background was transparent, shape dropped → nothing lit.
     let lit = frame.planes[0]
         .data
         .chunks_exact(4)

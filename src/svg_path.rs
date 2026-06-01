@@ -4,28 +4,39 @@
 //! syntax — each command is a single ASCII letter (case picks absolute
 //! / relative coordinates) followed by a list of `f32` arguments
 //! separated by whitespace and / or commas. The supported subset here
-//! covers everything `oxideav-core::Path` can express:
+//! covers every primitive `oxideav-core::Path` exposes:
 //!
-//! | Cmd        | Args                  | Meaning                               |
-//! |------------|-----------------------|---------------------------------------|
-//! | `M` / `m`  | `(x y)+`              | Move-to. Extra coord pairs become     |
-//! |            |                       | implicit line-to commands.            |
-//! | `L` / `l`  | `(x y)+`              | Line-to.                              |
-//! | `H` / `h`  | `x+`                  | Horizontal line-to.                   |
-//! | `V` / `v`  | `y+`                  | Vertical line-to.                     |
-//! | `C` / `c`  | `(x1 y1 x2 y2 x y)+`  | Cubic Bezier.                         |
-//! | `S` / `s`  | `(x2 y2 x y)+`        | Smooth cubic (reflect prev control).  |
-//! | `Q` / `q`  | `(x1 y1 x y)+`        | Quadratic Bezier.                     |
-//! | `T` / `t`  | `(x y)+`              | Smooth quadratic (reflect previous).  |
-//! | `Z` / `z`  | —                     | Close sub-path.                       |
+//! | Cmd        | Args                                          | Meaning                                |
+//! |------------|-----------------------------------------------|----------------------------------------|
+//! | `M` / `m`  | `(x y)+`                                      | Move-to. Extra coord pairs become      |
+//! |            |                                               | implicit line-to commands.             |
+//! | `L` / `l`  | `(x y)+`                                      | Line-to.                               |
+//! | `H` / `h`  | `x+`                                          | Horizontal line-to.                    |
+//! | `V` / `v`  | `y+`                                          | Vertical line-to.                      |
+//! | `C` / `c`  | `(x1 y1 x2 y2 x y)+`                          | Cubic Bezier.                          |
+//! | `S` / `s`  | `(x2 y2 x y)+`                                | Smooth cubic (reflect prev control).   |
+//! | `Q` / `q`  | `(x1 y1 x y)+`                                | Quadratic Bezier.                      |
+//! | `T` / `t`  | `(x y)+`                                      | Smooth quadratic (reflect previous).   |
+//! | `A` / `a`  | `(rx ry rot fA fS x y)+`                      | Elliptical arc. Per SVG 1.1 F.6, `fA`  |
+//! |            |                                               | and `fS` are single `0` / `1` flags    |
+//! |            |                                               | with no full-number lex, and may abut  |
+//! |            |                                               | the next token (`A5,5 0 0010,10`).     |
+//! | `Z` / `z`  | —                                             | Close sub-path.                        |
 //!
-//! Arc commands (`A` / `a`) are **not** parsed — `oxideav-core::Path`
-//! exposes only line / quad / cubic primitives, and converting an
-//! elliptical arc into a cubic-spline approximation is its own design
-//! decision (number of segments, error bound). Calling code with an
-//! arc-using path gets [`SvgPathError::UnsupportedCommand`] so the
-//! caller can decide whether to drop the object, log, or supply a
-//! pre-flattened path.
+//! Arc commands lower into [`oxideav_core::PathCommand::ArcTo`] — the
+//! `x_axis_rot` value is converted from SVG degrees to radians (to match
+//! the rest of `oxideav-core`'s angle convention), `fA` / `fS` map to
+//! the boolean `large_arc` / `sweep` fields, and out-of-range radii are
+//! left for the downstream raster pipeline to normalise per SVG 1.1
+//! F.6.6. `oxideav-raster`'s `flatten_arc_to_cubics` consumes the IR
+//! variant directly, so paths round-trip from parser to pixels without
+//! a separate flattening pass at scene-layer time.
+//!
+//! Per SVG 1.1 F.6.2 a degenerate arc with identical endpoints is
+//! equivalent to omitting the segment (the parser silently skips it);
+//! a `rx = 0` or `ry = 0` arc is treated as a straight line-to, matching
+//! the same paragraph. Negative radii are taken as absolutes per the
+//! same section.
 //!
 //! Numeric tokens accept SVG's standard forms: integers, decimals with
 //! optional leading sign, leading-dot decimals (`.5`), trailing-dot
@@ -33,12 +44,13 @@
 //! coordinate pairs may be separated by whitespace and / or a single
 //! comma.
 
-use oxideav_core::{Path, Point};
+use oxideav_core::{Path, PathCommand, Point};
 
 /// Reasons the path data could not be lowered to a [`Path`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum SvgPathError {
-    /// A command letter outside the supported set (currently arcs).
+    /// A command letter outside the supported set. With arc (`A` / `a`)
+    /// now handled, this is only reached on entirely unknown letters.
     UnsupportedCommand(char),
     /// A command was expected but the input ended (or contained a
     /// non-command, non-whitespace, non-digit character at top level).
@@ -51,6 +63,10 @@ pub enum SvgPathError {
     /// commands implicitly need a current point and the SVG spec
     /// requires `M` / `m` to be the first command.
     NotStartedWithMove,
+    /// An elliptical arc flag (`fA` / `fS`) was neither `0` nor `1`. Per
+    /// SVG 1.1 F.6.1 grammar a flag is a single ASCII digit drawn from
+    /// `{0, 1}`.
+    InvalidArcFlag,
 }
 
 /// Parse SVG path data into an [`oxideav_core::Path`].
@@ -97,19 +113,54 @@ pub fn parse_bbox(data: &str) -> Option<(f32, f32, f32, f32)> {
         }
     };
     use oxideav_core::PathCommand as C;
+    // Walk pen for arc bbox enclosure (the arc bound needs the start
+    // point as well as the endpoint).
+    let mut pen = (0.0f32, 0.0f32);
+    let mut sub_start = (0.0f32, 0.0f32);
     for c in &path.commands {
         match *c {
-            C::MoveTo(p) | C::LineTo(p) => push(p.x, p.y, &mut hit),
+            C::MoveTo(p) => {
+                push(p.x, p.y, &mut hit);
+                pen = (p.x, p.y);
+                sub_start = pen;
+            }
+            C::LineTo(p) => {
+                push(p.x, p.y, &mut hit);
+                pen = (p.x, p.y);
+            }
             C::QuadCurveTo { control, end } => {
                 push(control.x, control.y, &mut hit);
                 push(end.x, end.y, &mut hit);
+                pen = (end.x, end.y);
             }
             C::CubicCurveTo { c1, c2, end } => {
                 push(c1.x, c1.y, &mut hit);
                 push(c2.x, c2.y, &mut hit);
                 push(end.x, end.y, &mut hit);
+                pen = (end.x, end.y);
             }
-            C::Close => {}
+            C::ArcTo { rx, ry, end, .. } => {
+                // Conservative AABB for the arc: a rotation-agnostic
+                // strict superset is the union of two axis-aligned
+                // boxes of radius `max(|rx|, |ry|)` centred on the
+                // start and end points. Any point on the elliptic arc
+                // is within `max(rx, ry)` of *both* endpoints (the arc
+                // is a chord-bounded curve on an ellipse whose semi-
+                // axes are `rx`, `ry`), so this box contains it
+                // regardless of `x_axis_rot` / `large_arc` / `sweep`.
+                // Looser than the exact ellipse-aligned tight bound;
+                // matches the convex-hull-of-control-points style
+                // already used for cubics and quads.
+                let r = rx.abs().max(ry.abs());
+                push(pen.0 - r, pen.1 - r, &mut hit);
+                push(pen.0 + r, pen.1 + r, &mut hit);
+                push(end.x - r, end.y - r, &mut hit);
+                push(end.x + r, end.y + r, &mut hit);
+                pen = (end.x, end.y);
+            }
+            C::Close => {
+                pen = sub_start;
+            }
             _ => {}
         }
     }
@@ -185,9 +236,8 @@ impl<'a> Parser<'a> {
             'S' => self.cmd_smooth_cubic(abs)?,
             'Q' => self.cmd_quad(abs)?,
             'T' => self.cmd_smooth_quad(abs)?,
+            'A' => self.cmd_arc(abs)?,
             'Z' => self.cmd_close(),
-            // Arcs are deliberately unsupported (see module doc).
-            'A' => return Err(SvgPathError::UnsupportedCommand(cmd)),
             other => return Err(SvgPathError::UnsupportedCommand(other)),
         }
         // Clear smooth-curve reflection state for non-curve commands.
@@ -389,6 +439,60 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn cmd_arc(&mut self, abs: bool) -> Result<(), SvgPathError> {
+        // SVG 1.1 F.6.1 grammar (`elliptical-arc-argument`):
+        //   nonnegative-number comma-wsp? nonnegative-number comma-wsp?
+        //   number comma-wsp flag comma-wsp? flag comma-wsp? coordinate-pair
+        //
+        // The two flags are single ASCII `0` / `1` characters with no
+        // full-number lex — so common minified forms like
+        //   A 5 5 0 0010 10
+        // tokenize as rx=5 ry=5 rot=0 fA=0 fS=0 then coord-pair (10,10).
+        let mut got_any = false;
+        while self.peek_number().is_some() {
+            // rx, ry — per F.6.2 negatives drop to absolute values.
+            let rx = self.read_number()?.abs();
+            let ry = self.read_number()?.abs();
+            // x-axis-rotation in degrees; convert to radians for the
+            // oxideav-core ArcTo representation (which matches
+            // Transform2D::rotate's angle unit).
+            let rot_deg = self.read_number()?;
+            let rot_rad = rot_deg.to_radians();
+            let large_arc = self.read_flag()?;
+            let sweep = self.read_flag()?;
+            let (mut x, mut y) = self.read_pair()?;
+            if !abs {
+                x += self.cx;
+                y += self.cy;
+            }
+            // F.6.2: identical endpoints → omit the segment entirely.
+            let coincident =
+                (x - self.cx).abs() <= f32::EPSILON && (y - self.cy).abs() <= f32::EPSILON;
+            if !coincident {
+                if rx == 0.0 || ry == 0.0 {
+                    // F.6.2: zero radius → straight line-to.
+                    self.out.line_to(Point::new(x, y));
+                } else {
+                    self.out.commands.push(PathCommand::ArcTo {
+                        rx,
+                        ry,
+                        x_axis_rot: rot_rad,
+                        large_arc,
+                        sweep,
+                        end: Point::new(x, y),
+                    });
+                }
+                self.cx = x;
+                self.cy = y;
+            }
+            got_any = true;
+        }
+        if !got_any {
+            return Err(SvgPathError::Truncated);
+        }
+        Ok(())
+    }
+
     fn cmd_close(&mut self) {
         self.out.close();
         self.cx = self.start_x;
@@ -470,6 +574,25 @@ impl<'a> Parser<'a> {
         let x = self.read_number()?;
         let y = self.read_number()?;
         Ok((x, y))
+    }
+
+    /// Read a single SVG 1.1 F.6.1 flag — a one-byte token that must be
+    /// `0` or `1`. Optional leading wsp / comma is consumed, but the
+    /// character itself is single-digit (no full-number lex), so
+    /// minified forms like `0010` parse as flag=0, flag=0, num=10.
+    fn read_flag(&mut self) -> Result<bool, SvgPathError> {
+        self.skip_ws_comma();
+        if self.pos >= self.bytes.len() {
+            return Err(SvgPathError::Truncated);
+        }
+        let b = self.bytes[self.pos];
+        let v = match b {
+            b'0' => false,
+            b'1' => true,
+            _ => return Err(SvgPathError::InvalidArcFlag),
+        };
+        self.pos += 1;
+        Ok(v)
     }
 }
 
@@ -603,9 +726,136 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_arc_returns_error() {
-        let err = parse_path("M 0 0 A 5 5 0 0 0 10 10").unwrap_err();
-        assert!(matches!(err, SvgPathError::UnsupportedCommand('A')));
+    fn arc_absolute_with_separators() {
+        let p = parse_path("M 0 0 A 5 5 0 0 0 10 10").unwrap();
+        // 1 move + 1 arc.
+        assert_eq!(p.commands.len(), 2);
+        match p.commands[1] {
+            PathCommand::ArcTo {
+                rx,
+                ry,
+                x_axis_rot,
+                large_arc,
+                sweep,
+                end,
+            } => {
+                assert_eq!(rx, 5.0);
+                assert_eq!(ry, 5.0);
+                assert_eq!(x_axis_rot, 0.0);
+                assert!(!large_arc);
+                assert!(!sweep);
+                assert_eq!(end.x, 10.0);
+                assert_eq!(end.y, 10.0);
+            }
+            ref other => panic!("expected ArcTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_minified_flags_abutting_coords() {
+        // Per SVG 1.1 F.6.1, fA and fS are single 0|1 chars; the
+        // sequence `0010,10` is fA=0, fS=0, x=10, y=10.
+        let p = parse_path("M0,0A5,5 0 0010,10").unwrap();
+        assert_eq!(p.commands.len(), 2);
+        match p.commands[1] {
+            PathCommand::ArcTo { end, .. } => {
+                assert_eq!(end.x, 10.0);
+                assert_eq!(end.y, 10.0);
+            }
+            ref other => panic!("expected ArcTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_relative_endpoint() {
+        // Lowercase a → endpoint relative to current pen (10,20).
+        let p = parse_path("M 10 20 a 3 4 0 0 1 5 5").unwrap();
+        assert_eq!(p.commands.len(), 2);
+        match p.commands[1] {
+            PathCommand::ArcTo {
+                large_arc,
+                sweep,
+                end,
+                ..
+            } => {
+                assert!(!large_arc);
+                assert!(sweep);
+                assert_eq!(end.x, 15.0); // 10 + 5
+                assert_eq!(end.y, 25.0); // 20 + 5
+            }
+            ref other => panic!("expected ArcTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_zero_radius_becomes_line() {
+        // SVG 1.1 F.6.2: rx = 0 → straight line-to.
+        let p = parse_path("M 0 0 A 0 5 0 0 0 10 10").unwrap();
+        assert_eq!(p.commands.len(), 2);
+        assert!(matches!(p.commands[1], PathCommand::LineTo(_)));
+    }
+
+    #[test]
+    fn arc_negative_radius_taken_absolute() {
+        // SVG 1.1 F.6.2: negative radii are dropped.
+        let p = parse_path("M 0 0 A -5 -4 0 0 0 10 10").unwrap();
+        match p.commands[1] {
+            PathCommand::ArcTo { rx, ry, .. } => {
+                assert_eq!(rx, 5.0);
+                assert_eq!(ry, 4.0);
+            }
+            ref other => panic!("expected ArcTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_identical_endpoints_skip_segment() {
+        // SVG 1.1 F.6.2: endpoints (x1,y1) == (x2,y2) → omit segment.
+        let p = parse_path("M 5 5 A 3 3 0 0 0 5 5").unwrap();
+        // Only the move-to should survive.
+        assert_eq!(p.commands.len(), 1);
+    }
+
+    #[test]
+    fn arc_x_axis_rotation_in_radians() {
+        // Parser ingests degrees per SVG; IR stores radians.
+        let p = parse_path("M 0 0 A 10 5 90 0 0 10 0").unwrap();
+        match p.commands[1] {
+            PathCommand::ArcTo { x_axis_rot, .. } => {
+                let expected = std::f32::consts::FRAC_PI_2;
+                assert!((x_axis_rot - expected).abs() < 1e-5);
+            }
+            ref other => panic!("expected ArcTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arc_flag_must_be_zero_or_one() {
+        let err = parse_path("M 0 0 A 5 5 0 2 0 10 10").unwrap_err();
+        assert_eq!(err, SvgPathError::InvalidArcFlag);
+    }
+
+    #[test]
+    fn arc_chained_pairs_share_command() {
+        // Two arc tuples after a single `A` — pen advances between
+        // them so the second pair is anchored to the first's endpoint.
+        let p = parse_path("M 0 0 A 5 5 0 0 0 10 0 5 5 0 0 0 20 0").unwrap();
+        // 1 move + 2 arcs.
+        assert_eq!(p.commands.len(), 3);
+        assert!(matches!(p.commands[1], PathCommand::ArcTo { .. }));
+        assert!(matches!(p.commands[2], PathCommand::ArcTo { .. }));
+    }
+
+    #[test]
+    fn arc_bbox_contains_endpoints_and_radii() {
+        // For a quarter-circle from (0,0) to (10,0) with rx=ry=5, the
+        // conservative bound covers the endpoints expanded by max(rx,
+        // ry) in both axes — strict superset of the true arc bound.
+        let (min_x, min_y, max_x, max_y) = parse_bbox("M 0 0 A 5 5 0 0 0 10 0").unwrap();
+        assert!(min_x <= 0.0);
+        assert!(min_y <= 0.0);
+        assert!(max_x >= 10.0);
+        assert!(max_y >= 0.0);
     }
 
     #[test]

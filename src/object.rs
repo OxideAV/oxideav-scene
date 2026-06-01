@@ -819,15 +819,20 @@ mod tests {
     }
 
     #[test]
-    fn shape_path_arc_returns_none_for_now() {
-        // The svg_path parser deliberately rejects arc commands; the
-        // bbox query treats that as "no usable bound."
+    fn shape_path_arc_bbox_covers_endpoints() {
+        // Arcs now parse to `PathCommand::ArcTo`; the conservative
+        // bbox expands each arc endpoint by max(rx, ry) on both axes,
+        // so a 5-radius quarter-arc from (0,0) to (10,10) is bounded
+        // by at least the (-5, -5)..=(15, 15) box.
         let s = Shape::Path {
             data: "M0,0 A 5 5 0 0 0 10 10".to_string(),
             fill: 0,
             stroke: None,
         };
-        assert!(s.content_size().is_none());
+        let (w, h) = s.content_size().unwrap();
+        // (max - min) is the content_size return; max_x - min_x ≥ 15 - (-5) = 20.
+        assert!(w >= 20.0, "content width too tight: {w}");
+        assert!(h >= 20.0, "content height too tight: {h}");
     }
 
     #[test]

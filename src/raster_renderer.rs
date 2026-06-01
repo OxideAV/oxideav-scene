@@ -19,8 +19,11 @@
 //! * [`Background`] — `Solid`, `Transparent`, two-colour `LinearGradient`,
 //!   and the multi-stop [`Background::Gradient`] (linear + radial).
 //! * [`ObjectKind::Shape`] — `Rect` (with corner radius), `Polygon`, and
-//!   `Path` (SVG path data parsed via [`crate::svg_path::parse_path`];
-//!   unparseable data — including arcs — is skipped without error).
+//!   `Path` (SVG path data parsed via [`crate::svg_path::parse_path`],
+//!   including elliptical arcs `A` / `a` which round-trip through
+//!   [`oxideav_core::PathCommand::ArcTo`] and the raster pipeline's
+//!   arc-to-cubic flattener; unparseable data is skipped without
+//!   erroring the frame).
 //! * [`ObjectKind::Vector`] — the carried [`oxideav_core::VectorFrame`]'s
 //!   root group is inlined under the object's transform.
 //! * [`ObjectKind::Group`] — child object ids are resolved against the
@@ -387,10 +390,12 @@ fn shape_node(shape: &Shape) -> Option<Node> {
             Some(fill_stroke_node(path, *fill, stroke.as_ref()))
         }
         Shape::Path { data, fill, stroke } => {
-            // Parse the SVG path-data string into the core `Path` IR.
-            // Unparseable input (including the unsupported arc command)
-            // is dropped — the renderer never errors a frame on a bad
-            // shape; the caller can validate with
+            // Parse the SVG path-data string into the core `Path` IR
+            // (every SVG 1.1 path command including elliptical arcs
+            // `A` / `a`, which lower to `PathCommand::ArcTo` and are
+            // flattened to cubics by `oxideav-raster` downstream).
+            // Unparseable input is dropped — the renderer never errors
+            // a frame on a bad shape; the caller can validate with
             // `crate::svg_path::parse_path` ahead of time if a hard
             // failure is wanted.
             let path = svg_path::parse_path(data).ok()?;

@@ -47,12 +47,18 @@ renderers. Encoding and file-format I/O are still follow-ups.
   directly without rasterisation).
 - `svg_path::parse_path` / `parse_svg_path` (re-exported at the crate
   root) lowers an SVG 1.1 path-data string into an
-  `oxideav_core::Path`. The supported commands are `M / m`, `L / l`,
-  `H / h`, `V / v`, `C / c`, `S / s`, `Q / q`, `T / t`, `Z / z` — i.e.
-  everything `oxideav_core::Path` can express. Arc (`A / a`) lowering
-  is deferred (it needs a cubic-spline approximation pass). The
-  parser feeds `Shape::Path` rendering and `Shape::content_size`
-  bbox queries.
+  `oxideav_core::Path`. The supported commands cover the entire SVG
+  1.1 path-data grammar: `M / m`, `L / l`, `H / h`, `V / v`,
+  `C / c`, `S / s`, `Q / q`, `T / t`, `A / a`, `Z / z`. Elliptical
+  arcs lower into `PathCommand::ArcTo` — `x_axis_rot` is normalised
+  from SVG degrees to radians, flags map to `large_arc` / `sweep`
+  booleans, and the SVG 1.1 F.6.2 out-of-range rules (negative radii
+  taken absolute, zero radius → line-to, coincident endpoints →
+  omitted segment) are applied at parse time. The downstream
+  `oxideav-raster` pipeline flattens the arc IR variant into cubics
+  via `flatten_arc_to_cubics`, so path data round-trips parser →
+  pixels without a scene-layer flattening pass. The parser feeds
+  `Shape::Path` rendering and `Shape::content_size` bbox queries.
 - `SceneRenderer` + `SceneSampler` traits are defined; `StubRenderer`
   remains as the always-`Error::Unsupported` placeholder.
 - `Paint` + `Gradient` typed paint patterns (multi-stop linear /

@@ -9,18 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `svg_path` now parses elliptical arc commands `A / a` per SVG 1.1
+  F.6.1 — the grammar's special-cased single-digit `fA` / `fS` flag
+  tokens (which may abut the following number, e.g. `A5,5 0 0010,10`
+  → `rx=5 ry=5 rot=0 fA=0 fS=0 x=10 y=10`) parse via a dedicated
+  `read_flag` helper. Arcs lower into
+  `oxideav_core::PathCommand::ArcTo`: `x_axis_rot` is converted from
+  SVG degrees to radians, flags map to the `large_arc` / `sweep`
+  booleans, and the F.6.2 out-of-range rules apply at parse time —
+  negative radii are taken absolute, `rx = 0` or `ry = 0` becomes a
+  straight `line_to`, coincident endpoints are silently omitted. The
+  downstream raster pipeline already flattens `PathCommand::ArcTo`
+  via `oxideav_raster::flatten_arc_to_cubics`, so path data with
+  arcs now renders end-to-end through `RasterRenderer` rather than
+  being dropped. Bad flag tokens raise the new
+  `SvgPathError::InvalidArcFlag`.
 - `svg_path` module — minimal SVG 1.1 path-data parser
   (`parse_path` → `oxideav_core::Path`, plus `parse_bbox` for an
-  AABB summary). Supports `M / m`, `L / l`, `H / h`, `V / v`,
-  `C / c`, `S / s`, `Q / q`, `T / t`, `Z / z` (everything
-  `oxideav_core::Path` can express). Arc commands (`A / a`) return
-  `SvgPathError::UnsupportedCommand` so callers can decide whether
-  to drop, log, or pre-flatten. Number lexer accepts integers,
-  signed decimals, leading- / trailing-dot decimals, and scientific
+  AABB summary). Supports the full SVG 1.1 path-data command set:
+  `M / m`, `L / l`, `H / h`, `V / v`, `C / c`, `S / s`, `Q / q`,
+  `T / t`, `A / a`, `Z / z`. Number lexer accepts integers, signed
+  decimals, leading- / trailing-dot decimals, and scientific
   notation. Re-exported at the crate root as `parse_svg_path` +
-  `SvgPathError`. 18 unit tests cover commands, separators,
-  smooth-curve reflection, and the unsupported-arc / truncated-input
-  error paths.
+  `SvgPathError`. 28 unit tests cover commands, separators,
+  smooth-curve reflection, arc-grammar (absolute / relative /
+  minified flag-abutting / zero-radius / negative-radius /
+  coincident-endpoint / chained arc-tuples), and the
+  truncated-input / invalid-flag error paths.
+- `parse_bbox` now extends its conservative AABB across arc
+  segments — each `PathCommand::ArcTo` expands both endpoints by
+  `max(|rx|, |ry|)` on each axis, which is a rotation-agnostic
+  strict superset of the true elliptic-arc bound (any point on the
+  arc lies within `max(rx, ry)` of *both* endpoints). Matches the
+  convex-hull-of-control-points style already used for cubics and
+  quads. `Shape::Path` content size now reports a usable bound for
+  arc-using paths instead of `None`.
+- `RasterRenderer` now lowers SVG arc commands through to filled
+  geometry: the parser hands `PathCommand::ArcTo` to
+  `oxideav_raster::flatten_arc_to_cubics` inside the path-flattener,
+  so a wedge described as `M 0 16 A 16 16 0 0 0 16 0 L 0 0 Z`
+  rasterises as the expected quarter-disc fill. Covered by a new
+  `shape_path_arc_lowers_to_filled_arc_segment` integration test;
+  the previous `shape_path_with_arc_skips_without_error` test is
+  replaced by `shape_path_with_invalid_arc_flag_is_skipped` which
+  exercises the "parser bail → renderer drops the shape" path.
 - `RasterRenderer` now lowers `Shape::Path` through `svg_path` —
   parseable SVG paths render as filled (+ optionally stroked)
   geometry; unparseable data (including arc commands) is skipped
