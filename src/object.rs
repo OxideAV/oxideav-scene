@@ -132,11 +132,16 @@ impl ObjectKind {
     /// - [`ObjectKind::Live`] — the source's
     ///   [`hint_size`](LiveStreamHandle::hint_size), cast to `f32`
     ///   when present.
-    /// - [`ObjectKind::Image`], [`ObjectKind::Video`],
-    ///   [`ObjectKind::Text`], [`ObjectKind::Group`] — return
-    ///   `None`. These kinds either pull their extent from a frame
-    ///   the renderer fetches at render time (image / video / live
-    ///   without a hint), from a shaping engine the scene crate
+    /// - [`ObjectKind::Image`] — when the source is
+    ///   [`ImageSource::Decoded`], the carried frame's pixel
+    ///   dimensions decoded under the RGBA8-stride convention (see
+    ///   [`ImageSource::natural_size`]). [`ImageSource::Path`] /
+    ///   [`ImageSource::EncodedBytes`] return `None` — those need
+    ///   a decoder the scene crate doesn't bind.
+    /// - [`ObjectKind::Video`], [`ObjectKind::Text`],
+    ///   [`ObjectKind::Group`] — return `None`. These kinds either
+    ///   pull their extent from a frame the renderer fetches at
+    ///   render time (video), from a shaping engine the scene crate
     ///   doesn't bind (text), or from their referenced children
     ///   resolved against a scene (group). Callers wanting a
     ///   geometry estimate for these kinds pass a fallback into
@@ -146,10 +151,8 @@ impl ObjectKind {
             ObjectKind::Vector(vf) => Some((vf.width, vf.height)),
             ObjectKind::Shape(s) => s.content_size(),
             ObjectKind::Live(h) => h.hint_size.map(|(w, h)| (w as f32, h as f32)),
-            ObjectKind::Image(_)
-            | ObjectKind::Video(_)
-            | ObjectKind::Text(_)
-            | ObjectKind::Group(_) => None,
+            ObjectKind::Image(src) => src.natural_size().map(|(w, h)| (w as f32, h as f32)),
+            ObjectKind::Video(_) | ObjectKind::Text(_) | ObjectKind::Group(_) => None,
         }
     }
 }
@@ -528,11 +531,67 @@ pub struct ClipRect {
 #[derive(Clone, Debug)]
 pub enum ImageSource {
     /// Fully-decoded frame, `Arc`-shared so cloning is cheap.
+    ///
+    /// The renderer treats the carried [`oxideav_core::VideoFrame`] as a
+    /// single straight-alpha RGBA8 plane: `planes[0].stride` carries the
+    /// pixel width as `stride / 4`, and `planes[0].data.len() / stride`
+    /// carries the pixel height. This matches the convention that the
+    /// `oxideav-raster` rasteriser emits and reads at the
+    /// `Node::Image` sampling boundary, so a frame produced by
+    /// `oxideav_raster::Renderer::render` round-trips through
+    /// `Decoded(_)` without an intermediate conversion.
     Decoded(Arc<oxideav_core::VideoFrame>),
     /// Filesystem path — resolved lazily by the renderer.
     Path(String),
     /// Raw bytes of an encoded image file (PNG/JPEG/etc).
     EncodedBytes(Arc<[u8]>),
+}
+
+impl ImageSource {
+    /// Natural `(width, height)` in pixels when known to the scene
+    /// crate without invoking a decoder.
+    ///
+    /// - [`ImageSource::Decoded`] reports the carried frame's first
+    ///   plane decoded under the RGBA8-stride convention documented on
+    ///   the variant: `width = stride / 4`,
+    ///   `height = data.len() / stride`. Frames with a missing /
+    ///   degenerate first plane (`stride < 4`, or `stride` not divisible
+    ///   into `data.len()`) report `None`.
+    /// - [`ImageSource::Path`] and [`ImageSource::EncodedBytes`] always
+    ///   return `None` — extracting the natural dimensions would
+    ///   require a decoder the scene crate doesn't bind. Callers that
+    ///   need the size pre-decode an upstream frame and pass it via
+    ///   `Decoded`.
+    pub fn natural_size(&self) -> Option<(u32, u32)> {
+        match self {
+            ImageSource::Decoded(frame) => decoded_rgba_size(frame),
+            ImageSource::Path(_) | ImageSource::EncodedBytes(_) => None,
+        }
+    }
+}
+
+/// Decode the canonical RGBA8 plane convention from a
+/// [`oxideav_core::VideoFrame`]: width is `stride/4`, height is
+/// `data.len()/stride`. Returns `None` for frames that don't follow
+/// the convention (no planes, `stride < 4`, `stride` not divisible
+/// into `data.len()`).
+pub(crate) fn decoded_rgba_size(frame: &oxideav_core::VideoFrame) -> Option<(u32, u32)> {
+    let plane = frame.planes.first()?;
+    if plane.stride < 4 {
+        return None;
+    }
+    let width = plane.stride / 4;
+    if width == 0 {
+        return None;
+    }
+    if plane.data.len() % plane.stride != 0 {
+        return None;
+    }
+    let height = plane.data.len() / plane.stride;
+    if height == 0 {
+        return None;
+    }
+    Some((width as u32, height as u32))
 }
 
 /// Video source. Resolves packets via the container layer on
@@ -857,11 +916,37 @@ mod tests {
     }
 
     #[test]
-    fn image_video_text_group_have_no_intrinsic_extent() {
+    fn text_and_group_have_no_intrinsic_extent() {
         assert!(ObjectKind::Text(TextRun::default())
             .content_size()
             .is_none());
         assert!(ObjectKind::Group(Vec::new()).content_size().is_none());
+    }
+
+    #[test]
+    fn image_kind_picks_up_decoded_natural_size() {
+        use oxideav_core::{VideoFrame, VideoPlane};
+        use std::sync::Arc;
+        // 6 px wide × 3 px tall RGBA8 frame: stride = 24 = 6 * 4.
+        let frame = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 24,
+                data: vec![0u8; 24 * 3],
+            }],
+        };
+        let kind = ObjectKind::Image(ImageSource::Decoded(Arc::new(frame)));
+        assert_eq!(kind.content_size(), Some((6.0, 3.0)));
+    }
+
+    #[test]
+    fn image_kind_with_encoded_source_has_no_intrinsic_extent() {
+        let path_kind = ObjectKind::Image(ImageSource::Path("x.png".into()));
+        assert!(path_kind.content_size().is_none());
+        let bytes_kind = ObjectKind::Image(ImageSource::EncodedBytes(
+            vec![0x89, 0x50, 0x4e, 0x47].into(),
+        ));
+        assert!(bytes_kind.content_size().is_none());
     }
 
     #[test]

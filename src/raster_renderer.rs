@@ -32,13 +32,32 @@
 //!   sampled state). Cycles in the child graph are broken at the
 //!   second visit (each id rendered at most once per group expansion);
 //!   missing ids are silently dropped.
+//! * [`ObjectKind::Image`] with [`crate::ImageSource::Decoded`] — the
+//!   carried [`oxideav_core::VideoFrame`] is wrapped in a
+//!   [`oxideav_core::Node::Image`] under an
+//!   [`oxideav_core::ImageRef`] whose `bounds` rectangle is the
+//!   frame's natural `(width, height)` decoded under the RGBA8-stride
+//!   convention (see [`crate::ImageSource::natural_size`]). The
+//!   object's animation-merged [`Transform`] / opacity / clip wrap
+//!   it as for every other kind, so a 16×16 source frame placed at
+//!   `position = (5, 5)` paints into the canvas pixels `[5..21, 5..21)`
+//!   (top-left anchor). The downstream
+//!   [`oxideav_raster::Renderer`] samples the carried frame through
+//!   its configured [`oxideav_raster::ImageFilter`] (bilinear by
+//!   default; switch via [`oxideav_raster::Renderer::image_filter`]).
 //!
-//! The kinds that need a decoder or a font face are **skipped** (they
-//! contribute nothing to the frame, but never error):
+//! The kinds that still need a decoder or a font face are **skipped**
+//! (they contribute nothing to the frame, but never error):
 //!
-//! * [`ObjectKind::Image`] / [`ObjectKind::Video`] / [`ObjectKind::Live`]
-//!   — need a decoder / live source the scene crate doesn't bind. A
-//!   future renderer composites the pulled frame via
+//! * [`ObjectKind::Image`] with [`crate::ImageSource::Path`] or
+//!   [`crate::ImageSource::EncodedBytes`] — both still need a decoder
+//!   binding the scene crate doesn't carry. Pre-decode upstream and
+//!   feed the [`oxideav_core::VideoFrame`] back in via
+//!   [`crate::ImageSource::Decoded`] until a decoder-aware renderer
+//!   lands.
+//! * [`ObjectKind::Video`] / [`ObjectKind::Live`] — need a packet-level
+//!   decoder / live source the scene crate doesn't bind. A future
+//!   renderer composites the pulled frame via
 //!   [`crate::adapt::adapt_frame_to_canvas`].
 //! * [`ObjectKind::Text`] — needs a [`oxideav_scribe::Face`]; render it
 //!   with [`crate::text::TextRenderer`] and composite the result, or wait
@@ -54,8 +73,9 @@
 //! rather than rasterising.
 
 use oxideav_core::{
-    Error, FillRule, Group, LinearGradient, Node, Paint as CorePaint, Path, PathNode, Point,
-    RadialGradient, Result, Rgba, Stroke as CoreStroke, TimeBase, VectorFrame, VideoFrame,
+    Error, FillRule, Group, ImageRef, LinearGradient, Node, Paint as CorePaint, Path, PathNode,
+    Point, RadialGradient, Rect, Result, Rgba, Stroke as CoreStroke, TimeBase, Transform2D,
+    VectorFrame, VideoFrame,
 };
 use oxideav_raster::Renderer;
 
@@ -63,7 +83,7 @@ use std::collections::HashSet;
 
 use crate::duration::TimeStamp;
 use crate::id::ObjectId;
-use crate::object::{ClipRect, ObjectKind, SceneObject, Shape, Stroke, Transform};
+use crate::object::{ClipRect, ImageSource, ObjectKind, SceneObject, Shape, Stroke, Transform};
 use crate::paint::{Gradient, Stop};
 use crate::render::{RenderedFrame, SceneRenderer};
 use crate::scene::{Background, Scene};
@@ -308,6 +328,10 @@ fn lower_object(
             None => return None,
         },
         ObjectKind::Vector(vf) => vec![Node::Group(vf.root.clone())],
+        ObjectKind::Image(src) => match image_node(src) {
+            Some(n) => vec![n],
+            None => return None,
+        },
         ObjectKind::Group(ids) => {
             let mut nodes = Vec::new();
             for child_id in ids {
@@ -339,11 +363,16 @@ fn lower_object(
             }
             nodes
         }
-        // Resource-backed kinds: skipped (still need a decoder / font
-        // face binding).
-        ObjectKind::Image(_) | ObjectKind::Video(_) | ObjectKind::Text(_) | ObjectKind::Live(_) => {
-            return None
-        }
+        // Resource-backed kinds still needing a decoder / font face
+        // binding the scene crate doesn't carry:
+        //
+        // * `Video` / `Live` — packet-level decoder / live source.
+        // * `Text` — `oxideav_scribe::Face` registry.
+        //
+        // Pre-decoded `Image(ImageSource::Decoded(_))` is handled
+        // above; the `Path` / `EncodedBytes` arms inside `image_node`
+        // fall through to `None` so they continue to skip cleanly.
+        ObjectKind::Video(_) | ObjectKind::Text(_) | ObjectKind::Live(_) => return None,
     };
 
     Some(Node::Group(Group {
@@ -405,6 +434,41 @@ fn shape_node(shape: &Shape) -> Option<Node> {
             Some(fill_stroke_node(path, *fill, stroke.as_ref()))
         }
     }
+}
+
+/// Lower an [`ImageSource`] into a [`Node::Image`] sitting in the
+/// object's local content box.
+///
+/// Only [`ImageSource::Decoded`] produces a node — the carried
+/// [`oxideav_core::VideoFrame`] is wrapped in an [`ImageRef`] whose
+/// `bounds` rectangle spans `(0, 0)..(width, height)` for the frame's
+/// natural pixel dimensions (decoded via
+/// [`ImageSource::natural_size`]). The downstream
+/// [`oxideav_raster::Renderer`] sampler reads pixels through its
+/// configured [`oxideav_raster::ImageFilter`].
+///
+/// [`ImageSource::Path`] and [`ImageSource::EncodedBytes`] return
+/// `None` — both still need a decoder binding the scene crate doesn't
+/// carry. Callers that already have the decoded pixels in hand should
+/// build an `ImageSource::Decoded` instead; the renderer composites
+/// them in the same pass as every other supported object kind.
+fn image_node(src: &ImageSource) -> Option<Node> {
+    let frame = match src {
+        ImageSource::Decoded(f) => f,
+        // Encoded variants stay decoder-bound; skip silently for now
+        // and let a future renderer (with a decoder registry) handle
+        // them. `#[non_exhaustive]` makes the wildcard mandatory.
+        _ => return None,
+    };
+    let (w, h) = src.natural_size()?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(Node::Image(ImageRef {
+        frame: Box::new((**frame).clone()),
+        bounds: Rect::new(0.0, 0.0, w as f32, h as f32),
+        transform: Transform2D::identity(),
+    }))
 }
 
 /// Assemble a [`PathNode`] with a solid fill and an optional solid
@@ -736,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_text_and_image_kinds_without_error() {
+    fn skips_text_and_encoded_image_kinds_without_error() {
         use crate::object::{ImageSource, TextRun};
         let mut scene = Scene {
             canvas: Canvas::raster(8, 8),
@@ -748,9 +812,19 @@ mod tests {
             kind: ObjectKind::Text(TextRun::default()),
             ..SceneObject::default()
         });
+        // Encoded variants stay decoder-bound and still skip cleanly —
+        // `Decoded` is exercised in `image_object_lights_target_pixels`
+        // below.
         scene.objects.push(SceneObject {
             id: ObjectId::new(2),
             kind: ObjectKind::Image(ImageSource::Path("x.png".into())),
+            ..SceneObject::default()
+        });
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(3),
+            kind: ObjectKind::Image(ImageSource::EncodedBytes(
+                vec![0x89, 0x50, 0x4e, 0x47].into(),
+            )),
             ..SceneObject::default()
         });
         let mut r = RasterRenderer::new();
@@ -762,6 +836,246 @@ mod tests {
             .filter(|p| p[3] != 0)
             .count();
         assert_eq!(lit, 0);
+    }
+
+    /// Helper: build a solid-colour RGBA8 [`VideoFrame`] of the given
+    /// pixel dimensions, packed under the canonical
+    /// `stride = width * 4` convention that the rest of the pipeline
+    /// (raster sampler, scene `Decoded` natural-size decoding) reads.
+    fn solid_rgba_frame(width: u32, height: u32, rgba: [u8; 4]) -> VideoFrame {
+        use oxideav_core::VideoPlane;
+        let stride = (width as usize) * 4;
+        let mut data = Vec::with_capacity(stride * height as usize);
+        for _ in 0..(width as usize * height as usize) {
+            data.extend_from_slice(&rgba);
+        }
+        VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane { stride, data }],
+        }
+    }
+
+    #[test]
+    fn decoded_image_source_reports_natural_size() {
+        use std::sync::Arc;
+        let frame = solid_rgba_frame(7, 5, [0xFF, 0x00, 0x00, 0xFF]);
+        let src = ImageSource::Decoded(Arc::new(frame));
+        assert_eq!(src.natural_size(), Some((7, 5)));
+        assert_eq!(
+            ImageSource::Path("x.png".into()).natural_size(),
+            None,
+            "encoded path needs a decoder"
+        );
+        assert_eq!(
+            ImageSource::EncodedBytes(vec![0u8; 4].into()).natural_size(),
+            None,
+            "encoded bytes need a decoder"
+        );
+    }
+
+    #[test]
+    fn image_object_emits_image_node_under_object_transform() {
+        use std::sync::Arc;
+        let mut scene = Scene {
+            canvas: Canvas::raster(32, 32),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        let frame = solid_rgba_frame(4, 4, [0x12, 0x34, 0x56, 0xFF]);
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Image(ImageSource::Decoded(Arc::new(frame))),
+            transform: Transform {
+                position: (10.0, 10.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        });
+        let r = RasterRenderer::new();
+        let vf = r.build_frame(&scene, 0).unwrap();
+        // No background → only the object group on root.
+        assert_eq!(vf.root.children.len(), 1, "expected only the image group");
+        let Node::Group(g) = &vf.root.children[0] else {
+            panic!("expected a Group wrapper around the image");
+        };
+        assert_eq!(g.children.len(), 1, "expected a single Node::Image child");
+        match &g.children[0] {
+            Node::Image(img) => {
+                assert_eq!(
+                    (img.bounds.width as u32, img.bounds.height as u32),
+                    (4, 4),
+                    "bounds should match the source frame's natural size"
+                );
+                assert_eq!(img.bounds.x, 0.0);
+                assert_eq!(img.bounds.y, 0.0);
+            }
+            other => panic!("expected Node::Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_object_lights_target_pixels() {
+        use std::sync::Arc;
+        let mut scene = Scene {
+            canvas: Canvas::raster(32, 32),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        // 8×8 opaque blue source frame, placed at (10,10) top-left
+        // anchor — so canvas pixels [10..18, 10..18) should pick up
+        // the blue. Pixels outside stay clear.
+        let frame = solid_rgba_frame(8, 8, [0x00, 0x00, 0xFF, 0xFF]);
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Image(ImageSource::Decoded(Arc::new(frame))),
+            transform: Transform {
+                position: (10.0, 10.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        });
+        let mut r = RasterRenderer::new();
+        let out = r.render_at(&scene, 0).unwrap().video.unwrap();
+        // Interior pixel — should be opaque blue. The bilinear sampler
+        // matches the texel exactly at integer-centred lookups.
+        let inside = pixel(&out, 32, 13, 13);
+        assert_eq!(
+            inside[3], 0xFF,
+            "image interior should be opaque, got {inside:?}"
+        );
+        assert!(
+            inside[2] > 200 && inside[0] < 40 && inside[1] < 40,
+            "image interior should be blue, got {inside:?}"
+        );
+        // Pixel outside the placed image stays transparent.
+        let outside = pixel(&out, 32, 25, 25);
+        assert_eq!(
+            outside[3], 0,
+            "outside image bounds should stay clear, got {outside:?}"
+        );
+        // Pixel before the image starts on the X axis stays clear too.
+        let before = pixel(&out, 32, 2, 13);
+        assert_eq!(
+            before[3], 0,
+            "outside image bounds should stay clear, got {before:?}"
+        );
+    }
+
+    #[test]
+    fn image_object_honours_opacity() {
+        use std::sync::Arc;
+        let mut scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::Solid(0x000000FF),
+            ..Scene::default()
+        };
+        let frame = solid_rgba_frame(16, 16, [0xFF, 0xFF, 0xFF, 0xFF]);
+        let mut obj = SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Image(ImageSource::Decoded(Arc::new(frame))),
+            transform: Transform {
+                position: (0.0, 0.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        };
+        obj.opacity = 0.5;
+        scene.objects.push(obj);
+        let mut r = RasterRenderer::new();
+        let out = r.render_at(&scene, 0).unwrap().video.unwrap();
+        // White at 0.5 over black → roughly mid-grey, mirroring the
+        // existing `object_opacity_attenuates_coverage` shape test.
+        let px = pixel(&out, 16, 8, 8);
+        assert!(
+            (90..=165).contains(&px[0]),
+            "expected ~grey from a half-opaque image, got {px:?}"
+        );
+    }
+
+    #[test]
+    fn image_object_honours_clip_rect() {
+        use std::sync::Arc;
+        let mut scene = Scene {
+            canvas: Canvas::raster(32, 32),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        let frame = solid_rgba_frame(32, 32, [0xFF, 0xFF, 0xFF, 0xFF]);
+        let mut obj = SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Image(ImageSource::Decoded(Arc::new(frame))),
+            transform: Transform {
+                position: (0.0, 0.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        };
+        obj.clip = Some(ClipRect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 8.0,
+        });
+        scene.objects.push(obj);
+        let mut r = RasterRenderer::new();
+        let out = r.render_at(&scene, 0).unwrap().video.unwrap();
+        // Inside the clip: lit. Outside: clear — same shape as the
+        // `clip_rect_culls_outside_region` test on rects.
+        assert_eq!(pixel(&out, 32, 2, 2)[3], 0xFF, "inside clip should be lit");
+        assert_eq!(
+            pixel(&out, 32, 20, 20)[3],
+            0,
+            "outside clip should be clear"
+        );
+    }
+
+    #[test]
+    fn image_inside_group_renders_under_parent_transform() {
+        use std::sync::Arc;
+        let mut scene = Scene {
+            canvas: Canvas::raster(32, 32),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        let frame = solid_rgba_frame(4, 4, [0x00, 0xFF, 0x00, 0xFF]);
+        // Child image at (0,0) — would normally land in the top-left
+        // corner. Group offsets it by (12, 12).
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(10),
+            kind: ObjectKind::Image(ImageSource::Decoded(Arc::new(frame))),
+            transform: Transform {
+                position: (0.0, 0.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        });
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(20),
+            kind: ObjectKind::Group(vec![ObjectId::new(10)]),
+            transform: Transform {
+                position: (12.0, 12.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        });
+        let mut r = RasterRenderer::new();
+        let out = r.render_at(&scene, 0).unwrap().video.unwrap();
+        // Inside the parent-shifted image (12..16, 12..16) — green.
+        let inside = pixel(&out, 32, 13, 13);
+        assert_eq!(inside[3], 0xFF, "expected lit pixel, got {inside:?}");
+        assert!(
+            inside[1] > 200 && inside[0] < 40 && inside[2] < 40,
+            "expected green pixel, got {inside:?}"
+        );
+        // (1, 1) — where the un-grouped child would have painted — is
+        // clear, confirming the group transform reached the image.
+        assert_eq!(pixel(&out, 32, 1, 1)[3], 0);
     }
 
     #[test]

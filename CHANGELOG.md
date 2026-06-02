@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `RasterRenderer` now lowers `ObjectKind::Image(ImageSource::Decoded)`
+  into an `oxideav_core::Node::Image` and composites it through
+  `oxideav_raster::Renderer::draw_image` — pre-decoded straight-alpha
+  RGBA8 bitmaps participate in the same paint-order walk as backgrounds,
+  shapes, vector frames, and groups, under each object's animation-
+  merged `Transform` / opacity / clip. The renderer reads the carried
+  `VideoFrame`'s natural pixel dimensions from the canonical RGBA8-stride
+  convention (`width = stride / 4`, `height = data.len() / stride`),
+  matching the convention the raster crate itself emits and reads at
+  the `Node::Image` sampling boundary, so a frame produced by
+  `oxideav_raster::Renderer::render` round-trips through `Decoded(_)`
+  without an intermediate conversion. Encoded variants
+  (`ImageSource::Path` / `ImageSource::EncodedBytes`) continue to skip
+  silently — pre-decode upstream and feed back via `Decoded(_)` for now.
+- `ImageSource::natural_size()` exposes the same RGBA8-stride decoding
+  on `ImageSource::Decoded`; `ObjectKind::Image(_).content_size()` now
+  reports `Some((w, h))` for decoded image sources (and propagates
+  through `SceneObject::content_size` / `bbox`). Encoded variants still
+  return `None`.
 - `svg_path` now parses elliptical arc commands `A / a` per SVG 1.1
   F.6.1 — the grammar's special-cased single-digit `fA` / `fS` flag
   tokens (which may abut the following number, e.g. `A5,5 0 0010,10`

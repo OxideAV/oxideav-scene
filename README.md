@@ -35,16 +35,33 @@ renderers. Encoding and file-format I/O are still follow-ups.
   `Scene::sampled_at(t)` in paint order and composites the **vector
   slice** of a scene — backgrounds (solid / transparent / linear +
   radial gradient), `Shape` objects (rect with corner radius, polygon,
-  **SVG-`path`-data**), `ObjectKind::Vector` frames, and
+  **SVG-`path`-data**), `ObjectKind::Vector` frames,
   **`ObjectKind::Group`** containers (children resolved by id and
   inlined under the group's transform / opacity / clip; cycles
-  terminated; missing ids dropped) — into an RGBA8 `VideoFrame` via
-  `oxideav_raster::Renderer`, honouring each object's
-  animation-merged transform, opacity, and clip rect. Resource-backed
-  kinds (image / video / live / text) are skipped pending a
-  font-registry / decoder-aware renderer. `Canvas::Vector` scenes are
-  rejected with `Error::Unsupported` (they export their `VectorFrame`
+  terminated; missing ids dropped), and now
+  **`ObjectKind::Image(ImageSource::Decoded)`** — the carried
+  `oxideav_core::VideoFrame` is wrapped in a `Node::Image` whose
+  bounds rectangle spans the frame's natural `(width, height)`
+  decoded under the canonical RGBA8-stride convention
+  (`width = stride / 4`, `height = data.len() / stride`), so a
+  pre-decoded bitmap composites in the same pass as the rest of
+  the vector slice under the object's animation-merged transform /
+  opacity / clip. The downstream `oxideav_raster::Renderer`
+  samples through its configured `ImageFilter` (bilinear by
+  default). The result is an RGBA8 `VideoFrame`. Decoder-bound
+  `ImageSource::Path` / `ImageSource::EncodedBytes` continue to
+  skip silently — pre-decode upstream and feed back via
+  `Decoded(_)` for now. `ObjectKind::Video` / `ObjectKind::Live` /
+  `ObjectKind::Text` are skipped pending a font-registry /
+  decoder-aware renderer. `Canvas::Vector` scenes are rejected
+  with `Error::Unsupported` (they export their `VectorFrame`
   directly without rasterisation).
+- `ImageSource::natural_size()` (and via it
+  `ObjectKind::Image(_).content_size()`) report the carried frame's
+  natural pixel dimensions for `ImageSource::Decoded` under the same
+  RGBA8-stride convention the renderer reads. Encoded variants still
+  return `None` — extracting their natural dimensions would require
+  a decoder the scene crate doesn't bind.
 - `svg_path::parse_path` / `parse_svg_path` (re-exported at the crate
   root) lowers an SVG 1.1 path-data string into an
   `oxideav_core::Path`. The supported commands cover the entire SVG
