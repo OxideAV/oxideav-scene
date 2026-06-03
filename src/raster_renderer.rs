@@ -45,6 +45,18 @@
 //!   [`oxideav_raster::Renderer`] samples the carried frame through
 //!   its configured [`oxideav_raster::ImageFilter`] (bilinear by
 //!   default; switch via [`oxideav_raster::Renderer::image_filter`]).
+//! * [`ObjectKind::Video`] with [`crate::VideoSource::DecodedFrames`]
+//!   — the carried frame sequence is sampled at the current scene
+//!   time `t` via [`crate::VideoSource::frame_at`], which picks the
+//!   frame whose presentation interval contains `t` (using each
+//!   object's [`crate::Lifetime`] `start` as the sequence's `t = 0`).
+//!   The chosen frame is wrapped in the same [`oxideav_core::ImageRef`]
+//!   shape `Image(Decoded)` uses, so it composites under the object's
+//!   animation-merged [`Transform`] / opacity / clip in the same
+//!   paint-order pass as backgrounds, shapes, vector frames, images,
+//!   and groups. Sequence-ending samples hold on the final frame
+//!   until the object's lifetime expires — finite NLE clips freeze on
+//!   their tail rather than flash black.
 //!
 //! The kinds that still need a decoder or a font face are **skipped**
 //! (they contribute nothing to the frame, but never error):
@@ -55,9 +67,13 @@
 //!   feed the [`oxideav_core::VideoFrame`] back in via
 //!   [`crate::ImageSource::Decoded`] until a decoder-aware renderer
 //!   lands.
-//! * [`ObjectKind::Video`] / [`ObjectKind::Live`] — need a packet-level
-//!   decoder / live source the scene crate doesn't bind. A future
-//!   renderer composites the pulled frame via
+//! * [`ObjectKind::Video`] with [`crate::VideoSource::Path`] or
+//!   [`crate::VideoSource::EncodedBytes`] — same decoder-bound shape
+//!   as the encoded `Image` arms. Pre-decode upstream and feed back
+//!   via [`crate::VideoSource::DecodedFrames`] until a decoder-aware
+//!   renderer lands.
+//! * [`ObjectKind::Live`] — needs a live source the scene crate
+//!   doesn't bind. A future renderer composites the pulled frame via
 //!   [`crate::adapt::adapt_frame_to_canvas`].
 //! * [`ObjectKind::Text`] — needs a [`oxideav_scribe::Face`]; render it
 //!   with [`crate::text::TextRenderer`] and composite the result, or wait
@@ -85,7 +101,9 @@ use std::collections::HashSet;
 
 use crate::duration::TimeStamp;
 use crate::id::ObjectId;
-use crate::object::{ClipRect, ImageSource, ObjectKind, SceneObject, Shape, Stroke, Transform};
+use crate::object::{
+    ClipRect, ImageSource, ObjectKind, SceneObject, Shape, Stroke, Transform, VideoSource,
+};
 use crate::paint::{Gradient, Stop};
 use crate::render::{RenderedFrame, SceneRenderer};
 use crate::scene::{Background, Scene};
@@ -367,6 +385,10 @@ fn lower_object(
             Some(n) => vec![n],
             None => return None,
         },
+        ObjectKind::Video(src) => match video_node(src, ctx.t, obj.lifetime.start) {
+            Some(n) => vec![n],
+            None => return None,
+        },
         ObjectKind::Group(ids) => {
             let mut nodes = Vec::new();
             for child_id in ids {
@@ -398,16 +420,18 @@ fn lower_object(
             }
             nodes
         }
-        // Resource-backed kinds still needing a decoder / font face
-        // binding the scene crate doesn't carry:
+        // Resource-backed kinds still needing a font face / live
+        // source binding the scene crate doesn't carry:
         //
-        // * `Video` / `Live` — packet-level decoder / live source.
+        // * `Live` — pluggable live-source registry.
         // * `Text` — `oxideav_scribe::Face` registry.
         //
         // Pre-decoded `Image(ImageSource::Decoded(_))` is handled
-        // above; the `Path` / `EncodedBytes` arms inside `image_node`
-        // fall through to `None` so they continue to skip cleanly.
-        ObjectKind::Video(_) | ObjectKind::Text(_) | ObjectKind::Live(_) => return None,
+        // above; encoded `Image`/`Video` variants flow through their
+        // `image_node` / `video_node` lowerings and fall through to
+        // `None` for the decoder-bound arms so they continue to skip
+        // cleanly.
+        ObjectKind::Text(_) | ObjectKind::Live(_) => return None,
     };
 
     Some(Node::Group(Group {
@@ -495,6 +519,36 @@ fn image_node(src: &ImageSource) -> Option<Node> {
         // them. `#[non_exhaustive]` makes the wildcard mandatory.
         _ => return None,
     };
+    let (w, h) = src.natural_size()?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(Node::Image(ImageRef {
+        frame: Box::new((**frame).clone()),
+        bounds: Rect::new(0.0, 0.0, w as f32, h as f32),
+        transform: Transform2D::identity(),
+    }))
+}
+
+/// Lower a [`VideoSource`] into a [`Node::Image`] carrying the frame
+/// visible at scene time `t` relative to `lifetime_start`.
+///
+/// Only [`VideoSource::DecodedFrames`] produces a node — the frame is
+/// chosen by [`VideoSource::frame_at`], which steps through the
+/// sequence at the carried `frame_duration` cadence and clamps to the
+/// final frame past the end. The `ImageRef::bounds` rectangle spans
+/// `(0, 0)..(width, height)` of the first frame's natural pixel
+/// dimensions, matching the `Image` arm so a fixed-resolution
+/// sequence composites identically under each object's
+/// animation-merged transform / opacity / clip wrap.
+///
+/// [`VideoSource::Path`] and [`VideoSource::EncodedBytes`] return
+/// `None` — both still need a decoder binding the scene crate doesn't
+/// carry. Callers that already have the decoded frames in hand should
+/// build a `DecodedFrames` instead; the renderer composites them in
+/// the same pass as every other supported object kind.
+fn video_node(src: &VideoSource, t: TimeStamp, lifetime_start: TimeStamp) -> Option<Node> {
+    let frame = src.frame_at(t, lifetime_start)?;
     let (w, h) = src.natural_size()?;
     if w == 0 || h == 0 {
         return None;
@@ -860,6 +914,19 @@ mod tests {
             kind: ObjectKind::Image(ImageSource::EncodedBytes(
                 vec![0x89, 0x50, 0x4e, 0x47].into(),
             )),
+            ..SceneObject::default()
+        });
+        // Encoded Video variants stay decoder-bound too; covered here
+        // alongside the encoded Image arms so the "skip without error"
+        // contract holds for both sides.
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(4),
+            kind: ObjectKind::Video(VideoSource::Path("x.mp4".into())),
+            ..SceneObject::default()
+        });
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(5),
+            kind: ObjectKind::Video(VideoSource::EncodedBytes(vec![0u8; 8].into())),
             ..SceneObject::default()
         });
         let mut r = RasterRenderer::new();
@@ -1273,5 +1340,342 @@ mod tests {
     fn seek_is_noop_ok() {
         let mut r = RasterRenderer::new();
         assert!(r.seek(123).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // VideoSource::DecodedFrames — pre-decoded sequence composition.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn decoded_video_source_reports_first_frame_natural_size() {
+        use crate::duration::TimeStamp;
+        use std::sync::Arc;
+        let f0 = solid_rgba_frame(6, 4, [0x10, 0x20, 0x30, 0xFF]);
+        let f1 = solid_rgba_frame(6, 4, [0x40, 0x50, 0x60, 0xFF]);
+        let src = VideoSource::DecodedFrames {
+            frames: vec![Arc::new(f0), Arc::new(f1)],
+            frame_duration: 10 as TimeStamp,
+        };
+        assert_eq!(src.natural_size(), Some((6, 4)));
+        // Path / EncodedBytes still need a decoder.
+        assert_eq!(VideoSource::Path("x.mp4".into()).natural_size(), None);
+        assert_eq!(
+            VideoSource::EncodedBytes(vec![0u8; 4].into()).natural_size(),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_decoded_video_source_skips_silently() {
+        use crate::duration::TimeStamp;
+        let mut scene = Scene {
+            canvas: Canvas::raster(8, 8),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                frames: Vec::new(),
+                frame_duration: 1 as TimeStamp,
+            }),
+            ..SceneObject::default()
+        });
+        let mut r = RasterRenderer::new();
+        let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
+        let lit = frame.planes[0]
+            .data
+            .chunks_exact(4)
+            .filter(|p| p[3] != 0)
+            .count();
+        assert_eq!(lit, 0, "empty video sequence emits no pixels");
+    }
+
+    #[test]
+    fn video_object_emits_image_node_under_object_transform() {
+        use crate::duration::TimeStamp;
+        use std::sync::Arc;
+        let mut scene = Scene {
+            canvas: Canvas::raster(32, 32),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        let f0 = solid_rgba_frame(4, 4, [0x12, 0x34, 0x56, 0xFF]);
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                frames: vec![Arc::new(f0)],
+                frame_duration: 10 as TimeStamp,
+            }),
+            transform: Transform {
+                position: (10.0, 10.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        });
+        let r = RasterRenderer::new();
+        let vf = r.build_frame(&scene, 0).unwrap();
+        assert_eq!(vf.root.children.len(), 1, "expected only the video group");
+        let Node::Group(g) = &vf.root.children[0] else {
+            panic!("expected a Group wrapper around the video frame");
+        };
+        assert_eq!(g.children.len(), 1, "expected a single Node::Image child");
+        match &g.children[0] {
+            Node::Image(img) => {
+                assert_eq!(
+                    (img.bounds.width as u32, img.bounds.height as u32),
+                    (4, 4),
+                    "bounds should match the first frame's natural size"
+                );
+                assert_eq!(img.bounds.x, 0.0);
+                assert_eq!(img.bounds.y, 0.0);
+            }
+            other => panic!("expected Node::Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn video_object_advances_through_frames_with_scene_time() {
+        use crate::duration::TimeStamp;
+        use std::sync::Arc;
+        // Two-frame sequence, frame_duration = 10 ticks. At t=5 the
+        // first (red) frame is visible; at t=15 the second (green)
+        // frame is visible.
+        let red = solid_rgba_frame(8, 8, [0xFF, 0x00, 0x00, 0xFF]);
+        let green = solid_rgba_frame(8, 8, [0x00, 0xFF, 0x00, 0xFF]);
+        let make_scene = || {
+            let mut s = Scene {
+                canvas: Canvas::raster(16, 16),
+                background: Background::Transparent,
+                ..Scene::default()
+            };
+            s.objects.push(SceneObject {
+                id: ObjectId::new(1),
+                kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                    frames: vec![Arc::new(red.clone()), Arc::new(green.clone())],
+                    frame_duration: 10 as TimeStamp,
+                }),
+                transform: Transform {
+                    position: (4.0, 4.0),
+                    anchor: (0.0, 0.0),
+                    ..Transform::identity()
+                },
+                ..SceneObject::default()
+            });
+            s
+        };
+        let scene = make_scene();
+        let mut r = RasterRenderer::new();
+        let early = r.render_at(&scene, 5).unwrap().video.unwrap();
+        let mid = pixel(&early, 16, 7, 7);
+        assert_eq!(mid[3], 0xFF, "early-sample interior should be opaque");
+        assert!(
+            mid[0] > 200 && mid[1] < 40 && mid[2] < 40,
+            "early sample should be red (frame 0), got {mid:?}"
+        );
+        let late = r.render_at(&scene, 15).unwrap().video.unwrap();
+        let mid = pixel(&late, 16, 7, 7);
+        assert_eq!(mid[3], 0xFF, "late-sample interior should be opaque");
+        assert!(
+            mid[1] > 200 && mid[0] < 40 && mid[2] < 40,
+            "late sample should be green (frame 1), got {mid:?}"
+        );
+    }
+
+    #[test]
+    fn video_object_clamps_past_end_to_final_frame() {
+        use crate::duration::TimeStamp;
+        use std::sync::Arc;
+        // Two-frame sequence; sampling well past the end keeps the
+        // final (green) frame visible until the lifetime expires.
+        let red = solid_rgba_frame(8, 8, [0xFF, 0x00, 0x00, 0xFF]);
+        let green = solid_rgba_frame(8, 8, [0x00, 0xFF, 0x00, 0xFF]);
+        let mut scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                frames: vec![Arc::new(red), Arc::new(green)],
+                frame_duration: 10 as TimeStamp,
+            }),
+            transform: Transform {
+                position: (4.0, 4.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        });
+        let mut r = RasterRenderer::new();
+        let way_past = r.render_at(&scene, 10_000).unwrap().video.unwrap();
+        let px = pixel(&way_past, 16, 7, 7);
+        assert_eq!(px[3], 0xFF, "tail frame should still be opaque");
+        assert!(
+            px[1] > 200 && px[0] < 40 && px[2] < 40,
+            "tail should hold on final green frame, got {px:?}"
+        );
+    }
+
+    #[test]
+    fn video_object_honours_lifetime_start_offset() {
+        use crate::duration::Lifetime;
+        use crate::duration::TimeStamp;
+        use std::sync::Arc;
+        // Lifetime starts at t=100; the sequence's own t=0 is mapped
+        // there. At scene t=105 we should see frame 0 (red); at t=115
+        // frame 1 (green).
+        let red = solid_rgba_frame(8, 8, [0xFF, 0x00, 0x00, 0xFF]);
+        let green = solid_rgba_frame(8, 8, [0x00, 0xFF, 0x00, 0xFF]);
+        let mut scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                frames: vec![Arc::new(red), Arc::new(green)],
+                frame_duration: 10 as TimeStamp,
+            }),
+            transform: Transform {
+                position: (4.0, 4.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            lifetime: Lifetime {
+                start: 100,
+                end: None,
+            },
+            ..SceneObject::default()
+        });
+        let mut r = RasterRenderer::new();
+        let f0 = r.render_at(&scene, 105).unwrap().video.unwrap();
+        let p0 = pixel(&f0, 16, 7, 7);
+        assert!(
+            p0[0] > 200 && p0[1] < 40,
+            "t=105 should show red frame 0, got {p0:?}"
+        );
+        let f1 = r.render_at(&scene, 115).unwrap().video.unwrap();
+        let p1 = pixel(&f1, 16, 7, 7);
+        assert!(
+            p1[1] > 200 && p1[0] < 40,
+            "t=115 should show green frame 1, got {p1:?}"
+        );
+    }
+
+    #[test]
+    fn degenerate_decoded_video_frame_skips_silently() {
+        use crate::duration::TimeStamp;
+        use oxideav_core::VideoPlane;
+        use std::sync::Arc;
+        // First frame has a stride that doesn't divide cleanly into
+        // its data length — fails the RGBA8-stride round-trip; the
+        // renderer should drop the object instead of erroring.
+        let bad = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 16,
+                data: vec![0u8; 17],
+            }],
+        };
+        let mut scene = Scene {
+            canvas: Canvas::raster(8, 8),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                frames: vec![Arc::new(bad)],
+                frame_duration: 10 as TimeStamp,
+            }),
+            ..SceneObject::default()
+        });
+        let r = RasterRenderer::new();
+        let vf = r.build_frame(&scene, 0).unwrap();
+        assert_eq!(
+            vf.root.children.len(),
+            0,
+            "degenerate first frame should drop without erroring"
+        );
+        let mut r = RasterRenderer::new();
+        let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
+        let lit = frame.planes[0]
+            .data
+            .chunks_exact(4)
+            .filter(|p| p[3] != 0)
+            .count();
+        assert_eq!(lit, 0, "no node → canvas stays fully clear");
+    }
+
+    #[test]
+    fn video_object_honours_opacity() {
+        use crate::duration::TimeStamp;
+        use std::sync::Arc;
+        let mut scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::Solid(0x000000FF),
+            ..Scene::default()
+        };
+        let frame = solid_rgba_frame(16, 16, [0xFF, 0xFF, 0xFF, 0xFF]);
+        let mut obj = SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                frames: vec![Arc::new(frame)],
+                frame_duration: 10 as TimeStamp,
+            }),
+            transform: Transform {
+                position: (0.0, 0.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        };
+        obj.opacity = 0.5;
+        scene.objects.push(obj);
+        let mut r = RasterRenderer::new();
+        let out = r.render_at(&scene, 0).unwrap().video.unwrap();
+        let px = pixel(&out, 16, 8, 8);
+        assert!(
+            (90..=165).contains(&px[0]),
+            "expected ~grey from a half-opaque video frame, got {px:?}"
+        );
+    }
+
+    #[test]
+    fn zero_frame_duration_holds_on_first_frame() {
+        use crate::duration::TimeStamp;
+        use std::sync::Arc;
+        // A degenerate `frame_duration` of 0 should not divide-by-zero;
+        // the renderer holds on frame 0 regardless of scene time.
+        let red = solid_rgba_frame(8, 8, [0xFF, 0x00, 0x00, 0xFF]);
+        let mut scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::Transparent,
+            ..Scene::default()
+        };
+        scene.objects.push(SceneObject {
+            id: ObjectId::new(1),
+            kind: ObjectKind::Video(VideoSource::DecodedFrames {
+                frames: vec![Arc::new(red)],
+                frame_duration: 0 as TimeStamp,
+            }),
+            transform: Transform {
+                position: (4.0, 4.0),
+                anchor: (0.0, 0.0),
+                ..Transform::identity()
+            },
+            ..SceneObject::default()
+        });
+        let mut r = RasterRenderer::new();
+        let out = r.render_at(&scene, 1_000_000).unwrap().video.unwrap();
+        let px = pixel(&out, 16, 7, 7);
+        assert!(
+            px[0] > 200 && px[1] < 40 && px[2] < 40,
+            "frame_duration=0 should clamp to frame 0 (red), got {px:?}"
+        );
     }
 }

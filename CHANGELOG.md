@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `VideoSource::DecodedFrames { frames: Vec<Arc<VideoFrame>>,
+  frame_duration: TimeStamp }` — new video-source variant symmetric
+  with `ImageSource::Decoded` on the still-image side, carrying a
+  pre-decoded straight-alpha RGBA8 frame sequence whose presentation
+  cadence is the per-frame interval in scene-time ticks. The new
+  `VideoSource::natural_size()` reports the first frame's pixel
+  dimensions under the canonical RGBA8-stride convention shared with
+  `ImageSource::Decoded`; the new `VideoSource::frame_at(t,
+  lifetime_start)` resolves the visible frame index as
+  `((t - lifetime_start) / frame_duration).clamp(0, len-1)`, so
+  scene-time samples before the object's lifetime hold on frame 0,
+  samples in range step through the sequence at the carried cadence,
+  and samples past the end clamp to the final frame instead of
+  vanishing (finite NLE clips freeze on their tail rather than flash
+  black). A degenerate `frame_duration <= 0` falls back to frame 0
+  instead of dividing by zero. `RasterRenderer::build_frame` lowers
+  the chosen frame into an `oxideav_core::Node::Image` wrapped in an
+  `ImageRef` whose `bounds` rectangle spans the first frame's natural
+  pixel dimensions, so a fixed-resolution sequence composites in the
+  same paint-order pass as backgrounds, shapes, vector frames,
+  images, and groups under each object's animation-merged
+  `Transform` / opacity / clip. `ObjectKind::Video(_).content_size()`
+  picks up the new size accessor, so `SceneObject::bbox` / scene-wide
+  AABB queries / hit-tests now produce a tight rectangle for decoded
+  video objects too. Decoder-bound `VideoSource::Path` /
+  `VideoSource::EncodedBytes` continue to skip silently — pre-decode
+  upstream and feed back via this variant for now. 10 new tests cover
+  natural-size reporting, the sequence-step / clamp / empty / zero-
+  duration / lifetime-offset behaviours, the Node::Image emission
+  under the object transform, animation-merged opacity over a video
+  frame, the degenerate-stride drop, and the encoded-variant skip
+  path.
 - `Background::DecodedImage(Arc<VideoFrame>)` — new background variant
   symmetric with `ImageSource::Decoded` on the object side, carrying a
   pre-decoded straight-alpha RGBA8 frame for use as a full-canvas

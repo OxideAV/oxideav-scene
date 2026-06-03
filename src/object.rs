@@ -138,12 +138,15 @@ impl ObjectKind {
     ///   [`ImageSource::natural_size`]). [`ImageSource::Path`] /
     ///   [`ImageSource::EncodedBytes`] return `None` — those need
     ///   a decoder the scene crate doesn't bind.
-    /// - [`ObjectKind::Video`], [`ObjectKind::Text`],
-    ///   [`ObjectKind::Group`] — return `None`. These kinds either
-    ///   pull their extent from a frame the renderer fetches at
-    ///   render time (video), from a shaping engine the scene crate
-    ///   doesn't bind (text), or from their referenced children
-    ///   resolved against a scene (group). Callers wanting a
+    /// - [`ObjectKind::Video`] — when the source is
+    ///   [`VideoSource::DecodedFrames`], the first carried frame's
+    ///   pixel dimensions decoded under the same RGBA8-stride
+    ///   convention (see [`VideoSource::natural_size`]). The
+    ///   decoder-bound variants return `None`.
+    /// - [`ObjectKind::Text`], [`ObjectKind::Group`] — return `None`.
+    ///   These kinds either pull their extent from a shaping engine
+    ///   the scene crate doesn't bind (text) or from their referenced
+    ///   children resolved against a scene (group). Callers wanting a
     ///   geometry estimate for these kinds pass a fallback into
     ///   [`SceneObject::bbox`].
     pub fn content_size(&self) -> Option<(f32, f32)> {
@@ -152,7 +155,8 @@ impl ObjectKind {
             ObjectKind::Shape(s) => s.content_size(),
             ObjectKind::Live(h) => h.hint_size.map(|(w, h)| (w as f32, h as f32)),
             ObjectKind::Image(src) => src.natural_size().map(|(w, h)| (w as f32, h as f32)),
-            ObjectKind::Video(_) | ObjectKind::Text(_) | ObjectKind::Group(_) => None,
+            ObjectKind::Video(src) => src.natural_size().map(|(w, h)| (w as f32, h as f32)),
+            ObjectKind::Text(_) | ObjectKind::Group(_) => None,
         }
     }
 }
@@ -594,13 +598,96 @@ pub(crate) fn decoded_rgba_size(frame: &oxideav_core::VideoFrame) -> Option<(u32
     Some((width as u32, height as u32))
 }
 
-/// Video source. Resolves packets via the container layer on
-/// demand; the scene renderer advances it to the requested PTS.
+/// Video source. Either an already-decoded sequence of frames the
+/// renderer can sample directly, or a still-encoded container the
+/// scene crate doesn't bind a decoder for.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum VideoSource {
+    /// Pre-decoded frame sequence in display order, each carried as a
+    /// straight-alpha RGBA8 [`oxideav_core::VideoFrame`] under the
+    /// canonical stride convention shared with
+    /// [`ImageSource::Decoded`] (`width = stride / 4`,
+    /// `height = data.len() / stride`). `frame_duration` is the
+    /// per-frame interval in scene-time ticks (the same units as
+    /// [`crate::duration::TimeStamp`]); a sample at scene time `t`
+    /// inside the object's lifetime resolves to
+    /// `frames[((t - lifetime.start) / frame_duration).clamp(0, len-1)]`,
+    /// i.e. the most recent frame whose presentation interval
+    /// contains `t`. The clamp keeps a finished sequence holding on
+    /// its last frame until the object's `Lifetime` expires, which
+    /// matches the behaviour the NLE / compositor paths expect — a
+    /// frozen tail rather than a black flash.
+    ///
+    /// Frames whose first plane doesn't satisfy the RGBA8-stride
+    /// convention are reported as unsized; the renderer skips a video
+    /// object whose first frame is unsized so degenerate inputs
+    /// degrade gracefully (same policy as the object-side
+    /// [`ImageSource::Decoded`] arm).
+    DecodedFrames {
+        frames: Vec<Arc<oxideav_core::VideoFrame>>,
+        frame_duration: crate::duration::TimeStamp,
+    },
+    /// Filesystem path — resolved lazily by the renderer.
     Path(String),
+    /// Raw bytes of an encoded video container.
     EncodedBytes(Arc<[u8]>),
+}
+
+impl VideoSource {
+    /// Natural `(width, height)` in pixels when known to the scene
+    /// crate without invoking a decoder.
+    ///
+    /// - [`VideoSource::DecodedFrames`] reports the first carried
+    ///   frame's pixel dimensions decoded under the same RGBA8-stride
+    ///   convention [`ImageSource::natural_size`] uses. An empty
+    ///   sequence reports `None`; a sequence whose first frame is
+    ///   degenerate (no planes / `stride < 4` / `stride` not divisible
+    ///   into `data.len()`) also reports `None`.
+    /// - [`VideoSource::Path`] and [`VideoSource::EncodedBytes`] always
+    ///   return `None` — extracting natural dimensions would require a
+    ///   decoder the scene crate doesn't bind.
+    pub fn natural_size(&self) -> Option<(u32, u32)> {
+        match self {
+            VideoSource::DecodedFrames { frames, .. } => decoded_rgba_size(frames.first()?),
+            VideoSource::Path(_) | VideoSource::EncodedBytes(_) => None,
+        }
+    }
+
+    /// Resolve the visible frame at scene time `t` for an object whose
+    /// lifetime starts at `lifetime_start`. Returns `None` for
+    /// decoder-bound variants and for an empty
+    /// [`VideoSource::DecodedFrames`].
+    ///
+    /// The index is computed as `(t - lifetime_start) / frame_duration`
+    /// clamped to `0..len-1` — sampling before the object's lifetime
+    /// holds on frame 0, sampling past the end holds on the final
+    /// frame. A `frame_duration <= 0` falls back to frame 0 instead of
+    /// dividing by zero (the same defensive treatment used elsewhere
+    /// in the crate for malformed timing inputs).
+    pub fn frame_at(
+        &self,
+        t: crate::duration::TimeStamp,
+        lifetime_start: crate::duration::TimeStamp,
+    ) -> Option<&Arc<oxideav_core::VideoFrame>> {
+        let VideoSource::DecodedFrames {
+            frames,
+            frame_duration,
+        } = self
+        else {
+            return None;
+        };
+        if frames.is_empty() {
+            return None;
+        }
+        if *frame_duration <= 0 {
+            return frames.first();
+        }
+        let delta = t.saturating_sub(lifetime_start).max(0);
+        let idx = (delta / *frame_duration) as usize;
+        let last = frames.len() - 1;
+        Some(&frames[idx.min(last)])
+    }
 }
 
 /// Styled text run. Font resolution + shaping land in a separate
@@ -947,6 +1034,110 @@ mod tests {
             vec![0x89, 0x50, 0x4e, 0x47].into(),
         ));
         assert!(bytes_kind.content_size().is_none());
+    }
+
+    #[test]
+    fn video_kind_picks_up_decoded_first_frame_natural_size() {
+        use oxideav_core::{VideoFrame, VideoPlane};
+        use std::sync::Arc;
+        // 5 px wide × 4 px tall RGBA8 frame: stride = 20.
+        let f0 = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 20,
+                data: vec![0u8; 20 * 4],
+            }],
+        };
+        let f1 = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 20,
+                data: vec![0u8; 20 * 4],
+            }],
+        };
+        let kind = ObjectKind::Video(VideoSource::DecodedFrames {
+            frames: vec![Arc::new(f0), Arc::new(f1)],
+            frame_duration: 1,
+        });
+        assert_eq!(kind.content_size(), Some((5.0, 4.0)));
+    }
+
+    #[test]
+    fn video_kind_with_encoded_source_has_no_intrinsic_extent() {
+        let path_kind = ObjectKind::Video(VideoSource::Path("x.mp4".into()));
+        assert!(path_kind.content_size().is_none());
+        let bytes_kind = ObjectKind::Video(VideoSource::EncodedBytes(vec![0u8; 4].into()));
+        assert!(bytes_kind.content_size().is_none());
+    }
+
+    #[test]
+    fn video_source_frame_at_steps_through_sequence() {
+        use oxideav_core::{VideoFrame, VideoPlane};
+        use std::sync::Arc;
+        let f0 = Arc::new(VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 4,
+                data: vec![0xAA, 0x00, 0x00, 0xFF],
+            }],
+        });
+        let f1 = Arc::new(VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 4,
+                data: vec![0x00, 0xBB, 0x00, 0xFF],
+            }],
+        });
+        let src = VideoSource::DecodedFrames {
+            frames: vec![f0.clone(), f1.clone()],
+            frame_duration: 10,
+        };
+        // Lifetime starts at scene t=100. Scene t<100 still clamps to
+        // frame 0 (the `delta.max(0)` floor).
+        assert!(Arc::ptr_eq(src.frame_at(50, 100).unwrap(), &f0));
+        assert!(Arc::ptr_eq(src.frame_at(100, 100).unwrap(), &f0));
+        assert!(Arc::ptr_eq(src.frame_at(109, 100).unwrap(), &f0));
+        assert!(Arc::ptr_eq(src.frame_at(110, 100).unwrap(), &f1));
+        // Past end clamps to the final frame.
+        assert!(Arc::ptr_eq(src.frame_at(10_000, 100).unwrap(), &f1));
+    }
+
+    #[test]
+    fn video_source_frame_at_returns_none_for_decoder_bound_arms() {
+        assert!(VideoSource::Path("x.mp4".into()).frame_at(0, 0).is_none());
+        assert!(VideoSource::EncodedBytes(vec![0u8; 4].into())
+            .frame_at(0, 0)
+            .is_none());
+        assert!(VideoSource::DecodedFrames {
+            frames: Vec::new(),
+            frame_duration: 10,
+        }
+        .frame_at(0, 0)
+        .is_none());
+    }
+
+    #[test]
+    fn video_source_natural_size_decoded_first_frame() {
+        use oxideav_core::{VideoFrame, VideoPlane};
+        use std::sync::Arc;
+        let frame = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 32,
+                data: vec![0u8; 32 * 6],
+            }],
+        };
+        let src = VideoSource::DecodedFrames {
+            frames: vec![Arc::new(frame)],
+            frame_duration: 10,
+        };
+        assert_eq!(src.natural_size(), Some((8, 6)));
+        // Empty sequence reports None.
+        let empty = VideoSource::DecodedFrames {
+            frames: Vec::new(),
+            frame_duration: 10,
+        };
+        assert!(empty.natural_size().is_none());
     }
 
     #[test]
