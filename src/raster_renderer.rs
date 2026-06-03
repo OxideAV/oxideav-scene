@@ -114,9 +114,20 @@ use crate::svg_path;
 ///
 /// Holds a reusable [`oxideav_raster::Renderer`] so the per-glyph /
 /// per-group bitmap cache survives across `render_at` calls.
+///
+/// Also tracks `audio_cursor` — the scene-time tick of the *next*
+/// audio sample to be emitted into [`RenderedFrame::audio`]. The
+/// cursor starts at `0` and advances on every successful `render_at`
+/// to the requested `t`, so consecutive renders partition the audio
+/// timeline cleanly. `prepare` resets it to `0`; `seek(t)` snaps it to
+/// `t` (the renderer otherwise has no per-timestamp state to
+/// invalidate).
 #[derive(Debug)]
 pub struct RasterRenderer {
     renderer: Renderer,
+    /// Scene-time tick of the next audio sample to emit. The next
+    /// `render_at(t)` covers the interval `[audio_cursor, t)`.
+    audio_cursor: TimeStamp,
 }
 
 impl Default for RasterRenderer {
@@ -124,6 +135,7 @@ impl Default for RasterRenderer {
         Self {
             // Size is reset on every render_at to the scene's canvas.
             renderer: Renderer::new(1, 1),
+            audio_cursor: 0,
         }
     }
 }
@@ -223,6 +235,9 @@ impl SceneRenderer for RasterRenderer {
                  their VectorFrame directly without rasterisation",
             )
         })?;
+        // Re-anchor the audio cursor at the scene origin so the next
+        // `render_at(t)` emits audio for `[0, t)`.
+        self.audio_cursor = 0;
         Ok(())
     }
 
@@ -240,17 +255,32 @@ impl SceneRenderer for RasterRenderer {
         // backdrop node (if any) supplies the solid / gradient fill.
         self.renderer.background = Rgba::new(0, 0, 0, 0);
         let video: VideoFrame = self.renderer.render(&frame);
+
+        // Audio covers the interval `[audio_cursor, t)`. An out-of-
+        // order `render_at(t)` (t < audio_cursor) emits an empty slice
+        // and leaves the cursor where it was — callers must `seek`
+        // explicitly to rewind.
+        let audio = if t > self.audio_cursor {
+            let mixed = crate::audio_mix::mix_cues(scene, self.audio_cursor, t);
+            self.audio_cursor = t;
+            mixed
+        } else {
+            Vec::new()
+        };
+
         Ok(RenderedFrame {
             video: Some(video),
-            audio: Vec::new(),
+            audio,
             operations: Vec::new(),
         })
     }
 
-    fn seek(&mut self, _t: TimeStamp) -> Result<()> {
-        // RasterRenderer is stateless across timestamps — every
-        // `render_at` rebuilds the frame from scratch — so a seek is a
-        // no-op. (The bitmap cache stays valid; nothing to invalidate.)
+    fn seek(&mut self, t: TimeStamp) -> Result<()> {
+        // Snap the audio cursor to `t` so the next `render_at` emits
+        // audio starting there. The bitmap cache stays valid — the
+        // visual side is purely a function of `t` and rebuilds from
+        // scratch each frame.
+        self.audio_cursor = t;
         Ok(())
     }
 }

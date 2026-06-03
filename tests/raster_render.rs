@@ -395,3 +395,177 @@ fn animated_opacity_changes_rendered_coverage() {
         "opacity ramp should brighten: early={e} late={l}"
     );
 }
+
+#[test]
+fn render_emits_silent_audio_when_no_cues_present() {
+    // sample_rate 1 kHz, 100 ms → 100 samples.
+    let scene = Scene {
+        canvas: Canvas::raster(8, 8),
+        sample_rate: 1_000,
+        background: Background::Solid(0x202020FF),
+        ..Scene::default()
+    };
+    let mut r = RasterRenderer::new();
+    r.prepare(&scene).unwrap();
+    let out = r.render_at(&scene, 100).unwrap();
+    assert_eq!(out.audio.len(), 100);
+    assert!(out.audio.iter().all(|&s| s == 0.0));
+}
+
+#[test]
+fn audio_cursor_partitions_timeline_across_consecutive_renders() {
+    // 1 kHz sine, 1 kHz scene rate, 50 ms render then 50 ms render.
+    // The two buffers concatenated should equal a single 100 ms
+    // render — same prefix in the first half, same suffix in the
+    // second.
+    use oxideav_scene::{AudioCue, AudioSource, Generator};
+
+    let mut scene = Scene {
+        canvas: Canvas::raster(4, 4),
+        sample_rate: 1_000,
+        ..Scene::default()
+    };
+    scene.audio.push(AudioCue {
+        trigger: 0,
+        source: AudioSource::Generator(Generator::SineWave {
+            frequency_hz: 50.0,
+            amplitude: 0.5,
+        }),
+        volume: oxideav_scene::Animation::new(
+            oxideav_scene::AnimatedProperty::Volume,
+            Vec::new(),
+            oxideav_scene::Easing::Linear,
+            oxideav_scene::Repeat::Once,
+        ),
+        duck: Vec::new(),
+        end: None,
+    });
+
+    // Two consecutive renders.
+    let mut r = RasterRenderer::new();
+    r.prepare(&scene).unwrap();
+    let part1 = r.render_at(&scene, 50).unwrap().audio;
+    let part2 = r.render_at(&scene, 100).unwrap().audio;
+    assert_eq!(part1.len(), 50);
+    assert_eq!(part2.len(), 50);
+
+    // Single-shot render at the same boundaries via mix_cues helper
+    // (the renderer's own state advances; we compare to the
+    // stateless mixer to confirm chunk continuity).
+    let full = oxideav_scene::mix_cues(&scene, 0, 100);
+    assert_eq!(full.len(), 100);
+    for (i, &expect) in full.iter().enumerate() {
+        let got = if i < 50 { part1[i] } else { part2[i - 50] };
+        assert!(
+            (got - expect).abs() < 1e-4,
+            "chunk discontinuity at i={i}: got {got}, expected {expect}"
+        );
+    }
+}
+
+#[test]
+fn prepare_resets_audio_cursor_for_a_fresh_scene() {
+    // After advancing to t=100, `prepare` should pull the cursor
+    // back to 0 so the next render covers `[0, t)` again.
+    use oxideav_scene::{AudioCue, AudioSource};
+
+    let pcm: std::sync::Arc<[f32]> = std::sync::Arc::from(vec![0.25f32; 100].into_boxed_slice());
+    let mut scene = Scene {
+        canvas: Canvas::raster(4, 4),
+        sample_rate: 1_000,
+        ..Scene::default()
+    };
+    scene.audio.push(AudioCue {
+        trigger: 0,
+        source: AudioSource::PcmF32 {
+            sample_rate: 1_000,
+            channels: 1,
+            samples: pcm,
+        },
+        volume: oxideav_scene::Animation::new(
+            oxideav_scene::AnimatedProperty::Volume,
+            Vec::new(),
+            oxideav_scene::Easing::Linear,
+            oxideav_scene::Repeat::Once,
+        ),
+        duck: Vec::new(),
+        end: None,
+    });
+
+    let mut r = RasterRenderer::new();
+    r.prepare(&scene).unwrap();
+    let advance = r.render_at(&scene, 50).unwrap().audio;
+    assert_eq!(advance.len(), 50);
+    // Reset.
+    r.prepare(&scene).unwrap();
+    let again = r.render_at(&scene, 50).unwrap().audio;
+    assert_eq!(again.len(), 50);
+    // Same payload.
+    for (a, b) in advance.iter().zip(again.iter()) {
+        assert!((a - b).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn seek_snaps_audio_cursor_to_target_time() {
+    // After advancing to t=20, seek to t=50, then render to t=60 →
+    // audio buffer is 10 ms (60-50), not 40 ms (60-20).
+    use oxideav_scene::{AudioCue, AudioSource, Generator};
+
+    let mut scene = Scene {
+        canvas: Canvas::raster(4, 4),
+        sample_rate: 1_000,
+        ..Scene::default()
+    };
+    scene.audio.push(AudioCue {
+        trigger: 0,
+        source: AudioSource::Generator(Generator::Silence),
+        volume: oxideav_scene::Animation::new(
+            oxideav_scene::AnimatedProperty::Volume,
+            Vec::new(),
+            oxideav_scene::Easing::Linear,
+            oxideav_scene::Repeat::Once,
+        ),
+        duck: Vec::new(),
+        end: None,
+    });
+
+    let mut r = RasterRenderer::new();
+    r.prepare(&scene).unwrap();
+    r.render_at(&scene, 20).unwrap();
+    r.seek(50).unwrap();
+    let out = r.render_at(&scene, 60).unwrap();
+    assert_eq!(out.audio.len(), 10);
+}
+
+#[test]
+fn rewind_render_emits_empty_audio_without_advancing_cursor() {
+    // Rendering at t < audio_cursor (without a seek) yields no audio
+    // and leaves the cursor where it was.
+    let mut scene = Scene {
+        canvas: Canvas::raster(4, 4),
+        sample_rate: 1_000,
+        ..Scene::default()
+    };
+    scene.audio.push(oxideav_scene::AudioCue {
+        trigger: 0,
+        source: oxideav_scene::AudioSource::Generator(oxideav_scene::Generator::Silence),
+        volume: oxideav_scene::Animation::new(
+            oxideav_scene::AnimatedProperty::Volume,
+            Vec::new(),
+            oxideav_scene::Easing::Linear,
+            oxideav_scene::Repeat::Once,
+        ),
+        duck: Vec::new(),
+        end: None,
+    });
+    let mut r = RasterRenderer::new();
+    r.prepare(&scene).unwrap();
+    r.render_at(&scene, 50).unwrap();
+    // Re-render at the same t → empty.
+    let same = r.render_at(&scene, 50).unwrap();
+    assert!(same.audio.is_empty());
+    // Render at an earlier t → also empty.
+    let earlier = r.render_at(&scene, 10).unwrap();
+    assert!(earlier.audio.is_empty());
+}

@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `audio_mix` module — `mix_cues(scene, interval_start, interval_end)`
+  walks `scene.audio` and produces a mono `Vec<f32>` covering the
+  scene-time interval `[interval_start, interval_end)` at
+  `scene.sample_rate`. Re-exported at the crate root as `mix_cues`.
+  `RasterRenderer::render_at` now wires this into the
+  `RenderedFrame::audio` slot: each call tracks an `audio_cursor`
+  that advances to the rendered `t`, so consecutive
+  `render_at(scene, t)` calls partition the audio timeline cleanly
+  (the first call covers `[0, t)`, every subsequent one covers
+  `[prev_t, t)`). `prepare(scene)` snaps the cursor back to `0` for
+  a fresh render; `seek(t)` snaps it to `t`. Rendering at an earlier
+  timestamp without a `seek` returns an empty audio slice and leaves
+  the cursor where it was. Supported `AudioSource` variants:
+  `Generator::Silence` / `Generator::SineWave` / `Generator::WhiteNoise`
+  (phase / xorshift seeded from the scene-sample index since trigger,
+  so chunkings of the same interval yield bit-identical output),
+  `PcmS16` (scaled to `[-1, 1]` by dividing by 32768), and `PcmF32`
+  (passthrough). Stereo / multichannel PCM downmixes by averaging
+  across channels. Source sample rates that differ from the scene's
+  resample by nearest-neighbour (`floor(out * src / scene)`); a
+  future round can swap to linear / sinc. The mixer sums every
+  contributing cue, multiplies in the per-cue volume envelope
+  (`Animation` on `AnimatedProperty::Volume`, clamped to `[0.0, 1.0]`,
+  empty-keyframes-list treated as unity gain per the
+  `AudioCue::volume` contract), then clamps the summed result to
+  `[-1.0, 1.0]` so a downstream WAV encode can't overflow.
+  Decoder-bound `AudioSource::Path` / `AudioSource::EncodedBytes`
+  skip silently — pre-decode upstream and feed back via a PCM
+  variant for now (same shape as `ImageSource::Decoded` /
+  `VideoSource::DecodedFrames` on the visual side). PCM cues with a
+  known sample count surface a `natural_end`, so a 1-second clip
+  triggered at `t = 0` stops contributing at the matching scene
+  tick; `Generator` cues run forever unless `AudioCue::end` is set
+  explicitly. `Generator` is re-exported at the crate root. 16 unit
+  tests cover the empty-interval / no-cues / pre-trigger /
+  silence / sine-amplitude-bound / chunk-continuity / PCM-roundtrip
+  / S16-scaling / volume-attenuation / cue-summing / clipping /
+  explicit-end / stereo-downmix / decoder-skip / resampling paths;
+  5 new integration tests cover renderer-level silent-when-empty,
+  `audio_cursor` partitioning across consecutive renders, `prepare`
+  cursor reset, `seek` snap, and the rewind-without-seek empty-
+  return policy.
 - `VideoSource::DecodedFrames { frames: Vec<Arc<VideoFrame>>,
   frame_duration: TimeStamp }` — new video-source variant symmetric
   with `ImageSource::Decoded` on the still-image side, carrying a

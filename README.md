@@ -101,6 +101,27 @@ renderers. Encoding and file-format I/O are still follow-ups.
   via `flatten_arc_to_cubics`, so path data round-trips parser →
   pixels without a scene-layer flattening pass. The parser feeds
   `Shape::Path` rendering and `Shape::content_size` bbox queries.
+- `RasterRenderer::render_at(scene, t)` now also mixes the scene's
+  `AudioCue`s into the `RenderedFrame::audio` slot. The renderer
+  tracks an internal `audio_cursor` (next-sample scene tick); each
+  `render_at(scene, t)` emits a mono `Vec<f32>` covering
+  `[audio_cursor, t)` at `scene.sample_rate`, then advances the
+  cursor to `t`. `prepare(scene)` resets the cursor to `0`; `seek(t)`
+  snaps it to `t`; a rewind render (without a prior `seek`) returns
+  an empty audio slice and leaves the cursor where it was. Supported
+  sources: `Generator::Silence` / `Generator::SineWave` /
+  `Generator::WhiteNoise` (xorshift seeded from the scene-sample
+  index since trigger, so the noise is chunk-independent), `PcmS16`
+  (`/ 32768.0`), and `PcmF32`. Stereo / multichannel PCM downmixes
+  by averaging across channels; source sample rates that differ from
+  the scene's resample by nearest-neighbour. The summed mix is
+  multiplied by each cue's `volume` `Animation` (empty-keyframes-list
+  → unity gain) and clipped to `[-1.0, 1.0]`. The free function
+  `mix_cues(scene, start, end)` exposes the same mixer for callers
+  that want the audio path without invoking the visual renderer.
+  Decoder-bound `AudioSource::Path` / `AudioSource::EncodedBytes`
+  continue to skip silently — pre-decode upstream and feed back via
+  a PCM variant for now.
 - `SceneRenderer` + `SceneSampler` traits are defined; `StubRenderer`
   remains as the always-`Error::Unsupported` placeholder.
 - `Paint` + `Gradient` typed paint patterns (multi-stop linear /
@@ -474,6 +495,7 @@ src/
 ├── object.rs        — SceneObject + ObjectKind + Transform + BlendMode
 ├── animation.rs     — Animation + Keyframe + Easing + interpolation
 ├── audio.rs         — AudioCue + AudioSource
+├── audio_mix.rs     — mix_cues(): AudioCue list → mono f32 buffer
 ├── render.rs        — SceneRenderer + SceneSampler traits + StubRenderer
 ├── raster_renderer.rs — RasterRenderer: concrete SceneRenderer (bg + shapes + vector frames → RGBA)
 ├── raster.rs        — rasterize_vector(): VectorFrame → VideoFrame via oxideav-raster

@@ -62,6 +62,7 @@
 pub mod adapt;
 pub mod animation;
 pub mod audio;
+pub mod audio_mix;
 pub mod duration;
 pub mod id;
 pub mod object;
@@ -83,7 +84,8 @@ pub mod text;
 
 pub use adapt::{adapt_frame_to, adapt_frame_to_canvas, AdaptedSource};
 pub use animation::{AnimatedProperty, Animation, Easing, Keyframe, KeyframeValue, Repeat};
-pub use audio::{AudioCue, AudioSource, DuckBus};
+pub use audio::{AudioCue, AudioSource, DuckBus, Generator};
+pub use audio_mix::mix_cues;
 pub use duration::{Lifetime, SceneDuration, TimeStamp};
 pub use id::ObjectId;
 pub use object::{
