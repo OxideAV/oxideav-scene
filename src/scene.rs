@@ -1,8 +1,9 @@
 //! Root scene type.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use oxideav_core::{Rational, TimeBase};
+use oxideav_core::{Rational, TimeBase, VideoFrame};
 
 use crate::audio::AudioCue;
 use crate::duration::{Lifetime, SceneDuration, TimeStamp};
@@ -548,6 +549,28 @@ pub enum Background {
     /// Bitmap background — cover or contain fit is up to the
     /// renderer's layout policy.
     Image(String),
+    /// Pre-decoded straight-alpha RGBA8 bitmap background — symmetric
+    /// with [`crate::ImageSource::Decoded`] on the object side. The
+    /// carried [`oxideav_core::VideoFrame`] is read under the same
+    /// canonical RGBA8-stride convention the rest of the scene crate
+    /// uses (`width = stride / 4`,
+    /// `height = data.len() / stride`), so a frame produced by
+    /// `oxideav_raster::Renderer::render` (or any other RGBA8 source
+    /// emitting that convention) can be dropped straight in as a
+    /// backdrop without invoking a decoder.
+    ///
+    /// The renderer composites it full-canvas: the source frame is
+    /// drawn into the canvas-sized rectangle `(0, 0)..(w, h)` via the
+    /// downstream rasteriser's image sampler (bilinear by default), so
+    /// a non-canvas-sized backdrop is rescaled to cover. Future
+    /// renderer revisions may add explicit cover / contain / tile
+    /// layout policies; until then the canvas-fill behaviour matches
+    /// the simplest "stretch to backdrop" interpretation.
+    ///
+    /// The path-based [`Background::Image`] variant continues to skip
+    /// silently — pre-decode upstream and feed the resulting frame
+    /// back in via this variant until a decoder-aware renderer lands.
+    DecodedImage(Arc<VideoFrame>),
     /// Rich gradient background — multi-stop linear or radial. See
     /// the [`crate::paint`] module for stop conventions; the same
     /// per-channel linear interpolation as

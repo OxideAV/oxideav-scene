@@ -34,11 +34,14 @@ renderers. Encoding and file-format I/O are still follow-ups.
 - `RasterRenderer` is a concrete `SceneRenderer`: it walks
   `Scene::sampled_at(t)` in paint order and composites the **vector
   slice** of a scene — backgrounds (solid / transparent / linear +
-  radial gradient), `Shape` objects (rect with corner radius, polygon,
-  **SVG-`path`-data**), `ObjectKind::Vector` frames,
+  radial gradient, plus **`Background::DecodedImage(Arc<VideoFrame>)`**
+  — a pre-decoded straight-alpha RGBA8 backdrop wrapped in a
+  `Node::Image` spanning the full canvas, stretched edge-to-edge by
+  the downstream raster sampler), `Shape` objects (rect with corner
+  radius, polygon, **SVG-`path`-data**), `ObjectKind::Vector` frames,
   **`ObjectKind::Group`** containers (children resolved by id and
   inlined under the group's transform / opacity / clip; cycles
-  terminated; missing ids dropped), and now
+  terminated; missing ids dropped), and
   **`ObjectKind::Image(ImageSource::Decoded)`** — the carried
   `oxideav_core::VideoFrame` is wrapped in a `Node::Image` whose
   bounds rectangle spans the frame's natural `(width, height)`
@@ -49,13 +52,14 @@ renderers. Encoding and file-format I/O are still follow-ups.
   opacity / clip. The downstream `oxideav_raster::Renderer`
   samples through its configured `ImageFilter` (bilinear by
   default). The result is an RGBA8 `VideoFrame`. Decoder-bound
-  `ImageSource::Path` / `ImageSource::EncodedBytes` continue to
-  skip silently — pre-decode upstream and feed back via
-  `Decoded(_)` for now. `ObjectKind::Video` / `ObjectKind::Live` /
-  `ObjectKind::Text` are skipped pending a font-registry /
-  decoder-aware renderer. `Canvas::Vector` scenes are rejected
-  with `Error::Unsupported` (they export their `VectorFrame`
-  directly without rasterisation).
+  `ImageSource::Path` / `ImageSource::EncodedBytes` and the
+  path-based `Background::Image(_)` continue to skip silently —
+  pre-decode upstream and feed back via `Decoded(_)` /
+  `DecodedImage(_)` respectively for now. `ObjectKind::Video` /
+  `ObjectKind::Live` / `ObjectKind::Text` are skipped pending a
+  font-registry / decoder-aware renderer. `Canvas::Vector` scenes
+  are rejected with `Error::Unsupported` (they export their
+  `VectorFrame` directly without rasterisation).
 - `ImageSource::natural_size()` (and via it
   `ObjectKind::Image(_).content_size()`) report the carried frame's
   natural pixel dimensions for `ImageSource::Decoded` under the same

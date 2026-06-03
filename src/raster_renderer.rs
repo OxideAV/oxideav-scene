@@ -77,6 +77,8 @@ use oxideav_core::{
     Point, RadialGradient, Rect, Result, Rgba, Stroke as CoreStroke, TimeBase, Transform2D,
     VectorFrame, VideoFrame,
 };
+
+use crate::object::decoded_rgba_size;
 use oxideav_raster::Renderer;
 
 use std::collections::HashSet;
@@ -241,6 +243,15 @@ impl SceneRenderer for RasterRenderer {
 
 /// Build a full-canvas backdrop node for `bg`, or `None` for a
 /// transparent background (nothing to paint).
+///
+/// [`Background::DecodedImage`] lowers symmetrically with the object
+/// path (see [`image_node`]): the carried [`VideoFrame`] is wrapped in
+/// a [`Node::Image`] whose `bounds` rectangle covers the full canvas,
+/// so the downstream rasteriser stretches the source frame across the
+/// backdrop. Frames whose first plane doesn't follow the canonical
+/// RGBA8-stride convention (`width = stride / 4`,
+/// `height = data.len() / stride`) skip silently — the backdrop is
+/// then transparent, mirroring [`Background::Transparent`].
 fn background_node(bg: &Background, w: f32, h: f32) -> Option<Node> {
     let fill = match bg {
         Background::Transparent => return None,
@@ -256,10 +267,34 @@ fn background_node(bg: &Background, w: f32, h: f32) -> Option<Node> {
             h,
         ),
         Background::Gradient(g) => gradient_paint(g, w, h),
-        // `Background::Image` needs a decoder, and `Background` is
-        // `#[non_exhaustive]` so future variants land here too — both
-        // are skipped (no backdrop node) until a decoder-aware renderer
-        // handles them.
+        Background::DecodedImage(frame) => {
+            // Symmetric with ObjectKind::Image(ImageSource::Decoded):
+            // wrap the frame in a Node::Image whose bounds span the
+            // full canvas. The downstream raster sampler stretches
+            // the source pixels across the backdrop via its
+            // configured ImageFilter (bilinear by default), so a
+            // non-canvas-sized source frame fills the backdrop with
+            // the simplest "stretch to fit" interpretation. Frames
+            // that don't follow the RGBA8-stride convention skip
+            // silently — the same "drop on degenerate" policy used
+            // for object-side images.
+            let (fw, fh) = decoded_rgba_size(frame)?;
+            if fw == 0 || fh == 0 {
+                return None;
+            }
+            return Some(Node::Image(ImageRef {
+                frame: Box::new((**frame).clone()),
+                bounds: Rect::new(0.0, 0.0, w, h),
+                transform: Transform2D::identity(),
+            }));
+        }
+        // `Background::Image` (filesystem path) needs a decoder the
+        // scene crate doesn't bind, and `Background` is
+        // `#[non_exhaustive]` so future variants land here too —
+        // both are skipped (no backdrop node) until a decoder-aware
+        // renderer handles them. Callers with an already-decoded
+        // frame in hand should reach for `Background::DecodedImage`
+        // above instead.
         _ => return None,
     };
     let path = rect_path(0.0, 0.0, w, h);
@@ -1095,6 +1130,143 @@ mod tests {
         let frame = r.build_frame(&scene, 0).unwrap();
         // 1 background backdrop + 2 object groups.
         assert_eq!(frame.root.children.len(), 3);
+    }
+
+    #[test]
+    fn decoded_image_background_emits_full_canvas_image_node() {
+        use std::sync::Arc;
+        let bg_frame = solid_rgba_frame(4, 4, [0x10, 0x20, 0x30, 0xFF]);
+        let scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::DecodedImage(Arc::new(bg_frame)),
+            ..Scene::default()
+        };
+        let r = RasterRenderer::new();
+        let vf = r.build_frame(&scene, 0).unwrap();
+        // Only the backdrop node, no objects.
+        assert_eq!(vf.root.children.len(), 1);
+        match &vf.root.children[0] {
+            Node::Image(img) => {
+                // Backdrop bounds span the full canvas.
+                assert_eq!(img.bounds.x, 0.0);
+                assert_eq!(img.bounds.y, 0.0);
+                assert_eq!(img.bounds.width as u32, 16);
+                assert_eq!(img.bounds.height as u32, 16);
+            }
+            other => panic!("expected Node::Image backdrop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decoded_image_background_lights_target_pixels() {
+        use std::sync::Arc;
+        // 8×8 opaque red source — backdrop should stretch across the
+        // 16×16 canvas, so every canvas pixel reports red+opaque.
+        let bg_frame = solid_rgba_frame(8, 8, [0xFF, 0x00, 0x00, 0xFF]);
+        let scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::DecodedImage(Arc::new(bg_frame)),
+            ..Scene::default()
+        };
+        let mut r = RasterRenderer::new();
+        let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
+        // Mid-canvas pixel — should be opaque red after the bilinear
+        // stretch of the constant-colour source.
+        let centre = pixel(&frame, 16, 8, 8);
+        assert_eq!(centre[3], 0xFF, "backdrop centre should be opaque");
+        assert!(
+            centre[0] > 200 && centre[1] < 40 && centre[2] < 40,
+            "backdrop centre should be red, got {centre:?}"
+        );
+        // Corner pixel — should also be red (a constant-colour source
+        // stretches to a constant-colour backdrop edge to edge).
+        let corner = pixel(&frame, 16, 0, 0);
+        assert_eq!(corner[3], 0xFF, "backdrop corner should be opaque");
+        assert!(
+            corner[0] > 200 && corner[1] < 40 && corner[2] < 40,
+            "backdrop corner should be red, got {corner:?}"
+        );
+    }
+
+    #[test]
+    fn decoded_image_background_composites_under_objects() {
+        use std::sync::Arc;
+        // Red 16×16 backdrop; green 8×8 object at (4,4). The object
+        // wins inside its rectangle (paint order: backdrop first).
+        let bg_frame = solid_rgba_frame(16, 16, [0xFF, 0x00, 0x00, 0xFF]);
+        let mut scene = Scene {
+            canvas: Canvas::raster(16, 16),
+            background: Background::DecodedImage(Arc::new(bg_frame)),
+            ..Scene::default()
+        };
+        scene
+            .objects
+            .push(rect_obj(1, 4.0, 4.0, 8.0, 8.0, 0x00FF00FF, 0));
+        let mut r = RasterRenderer::new();
+        let out = r.render_at(&scene, 0).unwrap().video.unwrap();
+        // Inside the rect — green wins.
+        let inside = pixel(&out, 16, 8, 8);
+        assert!(
+            inside[1] > 200 && inside[0] < 40,
+            "object should win over backdrop, got {inside:?}"
+        );
+        // Outside the rect — backdrop red shows through.
+        let outside = pixel(&out, 16, 1, 1);
+        assert!(
+            outside[0] > 200 && outside[1] < 40 && outside[2] < 40,
+            "backdrop should show outside object bounds, got {outside:?}"
+        );
+    }
+
+    #[test]
+    fn degenerate_decoded_image_background_skips_silently() {
+        use oxideav_core::VideoPlane;
+        use std::sync::Arc;
+        // A "frame" whose first plane carries a stride that doesn't
+        // divide cleanly into the data length — fails the
+        // RGBA8-stride round-trip and should drop the backdrop without
+        // erroring the render (no node emitted; canvas stays clear).
+        let bad = VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: 16,
+                data: vec![0u8; 17], // 17 % 16 != 0
+            }],
+        };
+        let scene = Scene {
+            canvas: Canvas::raster(8, 8),
+            background: Background::DecodedImage(Arc::new(bad)),
+            ..Scene::default()
+        };
+        let r = RasterRenderer::new();
+        let vf = r.build_frame(&scene, 0).unwrap();
+        assert_eq!(
+            vf.root.children.len(),
+            0,
+            "degenerate backdrop should drop without erroring"
+        );
+        let mut r = RasterRenderer::new();
+        let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
+        let lit = frame.planes[0]
+            .data
+            .chunks_exact(4)
+            .filter(|p| p[3] != 0)
+            .count();
+        assert_eq!(lit, 0, "no backdrop → canvas stays fully clear");
+    }
+
+    #[test]
+    fn path_background_image_still_skips_silently() {
+        // The path-based variant continues to need a decoder binding
+        // the scene crate doesn't carry; the backdrop drops cleanly.
+        let scene = Scene {
+            canvas: Canvas::raster(8, 8),
+            background: Background::Image("nonexistent.png".into()),
+            ..Scene::default()
+        };
+        let r = RasterRenderer::new();
+        let vf = r.build_frame(&scene, 0).unwrap();
+        assert_eq!(vf.root.children.len(), 0);
     }
 
     #[test]

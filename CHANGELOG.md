@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Background::DecodedImage(Arc<VideoFrame>)` — new background variant
+  symmetric with `ImageSource::Decoded` on the object side, carrying a
+  pre-decoded straight-alpha RGBA8 frame for use as a full-canvas
+  backdrop without invoking a decoder. `RasterRenderer::build_frame`
+  lowers it into an `oxideav_core::Node::Image` wrapped in an
+  `ImageRef` whose `bounds` rectangle spans the full canvas
+  `(0, 0)..(w, h)`, so the downstream `oxideav_raster::Renderer`
+  stretches the source frame across the backdrop via its configured
+  `ImageFilter` (bilinear by default). The carried `VideoFrame` is
+  read under the canonical RGBA8-stride convention shared with the
+  object-side `Decoded` arm (`width = stride / 4`,
+  `height = data.len() / stride`); frames whose first plane doesn't
+  satisfy that convention skip silently (the backdrop reduces to
+  `Background::Transparent`). The path-based `Background::Image(_)`
+  variant continues to skip — pre-decode upstream and feed back via
+  this variant until a decoder-aware renderer lands. 5 new tests
+  cover backdrop node emission, full-canvas pixel coverage of a
+  constant-colour source, painter's-order composition with foreground
+  objects, the degenerate-stride drop, and the path-variant skip path.
 - `RasterRenderer` now lowers `ObjectKind::Image(ImageSource::Decoded)`
   into an `oxideav_core::Node::Image` and composites it through
   `oxideav_raster::Renderer::draw_image` — pre-decoded straight-alpha
