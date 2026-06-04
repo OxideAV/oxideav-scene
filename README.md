@@ -140,6 +140,22 @@ renderers. Encoding and file-format I/O are still follow-ups.
   monotonically-increasing object id; pair with
   `Operation::AddObject` to keep the streaming-compositor wire
   format short.
+- `Light` / `LightCommon` / `SpotParams` typed punctual-light
+  primitive in the `light` module — a first 3D-adjacent surface,
+  parameterised per the glTF 2.0 ratified extension for punctual
+  lights. Three variants — `Directional` / `Point` / `Spot` — share
+  `name` / linear-RGB `color` / `intensity` / optional `range`
+  distance cutoff; `Spot` adds `inner_cone_angle` / `outer_cone_angle`
+  (radians, defaults `0.0` / `PI/4`). Helpers: `is_directional` /
+  `is_point` / `is_spot`, `has_position`, `has_direction`,
+  `honours_range`, `spot_params()`, and
+  `distance_attenuation(distance)` implementing the recommended
+  `max(min(1 − (d/range)^4, 1), 0) / d²` rule (falls back to `1/d²`
+  with no range, returns `1.0` for the directional variant, clamps
+  NaN / non-positive distances to `1.0`). `SpotParams::is_valid`
+  enforces `0 ≤ inner < outer ≤ π/2`. Renderer-side integration is a
+  follow-up — the type is exposed so 3D-scene importers have a typed
+  landing place.
 - No `oxideav-codec` or container integration yet — that comes after
   the render pipeline is real.
 

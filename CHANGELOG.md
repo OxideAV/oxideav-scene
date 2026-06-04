@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `light` module — typed punctual-light primitive (first 3D-adjacent
+  surface). The `Light` enum has three variants — `Directional`,
+  `Point`, `Spot` — each carrying a shared `LightCommon` block (name,
+  linear-RGB `color`, `intensity`, optional `range` distance cutoff)
+  plus a per-variant payload (`Spot` carries `SpotParams` with
+  `inner_cone_angle` / `outer_cone_angle` in radians, defaulting to
+  `0.0` / `PI/4` to match the punctual-light ratified extension).
+  Convenience accessors include `is_directional` / `is_point` /
+  `is_spot`, `has_position`, `has_direction`, `honours_range`,
+  `spot_params()`, and `distance_attenuation(distance)` which
+  implements the recommended
+  `max(min(1 − (d/range)^4, 1), 0) / d²` formula (falls back to
+  `1/d²` when `range` is unset, returns `1.0` for the directional
+  variant, and clamps NaN / non-positive distances to `1.0` to avoid
+  blow-ups). `SpotParams::is_valid` enforces the documented invariants
+  (`0 ≤ inner < outer ≤ π/2`). Re-exported at the crate root as
+  `Light`, `LightCommon`, `SpotParams`. Renderer-side integration is a
+  follow-up — the type is exposed so 3D-scene importers have a typed
+  landing place.
+
 - `audio_mix` module — `mix_cues(scene, interval_start, interval_end)`
   walks `scene.audio` and produces a mono `Vec<f32>` covering the
   scene-time interval `[interval_start, interval_end)` at
