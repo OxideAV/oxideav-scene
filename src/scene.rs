@@ -8,6 +8,7 @@ use oxideav_core::{Rational, TimeBase, VideoFrame};
 use crate::audio::AudioCue;
 use crate::duration::{Lifetime, SceneDuration, TimeStamp};
 use crate::id::ObjectId;
+use crate::light::LightInstance;
 use crate::object::{Canvas, SceneObject};
 use crate::ops::Operation;
 use crate::page::Page;
@@ -62,6 +63,21 @@ pub struct Scene {
     /// in timeline mode (the default). See [`Scene`] for the
     /// dispatch contract.
     pub pages: Option<Vec<Page>>,
+    /// 3D punctual lights for scenes that carry 3D content.
+    ///
+    /// Each [`LightInstance`] pairs a typed [`crate::Light`] with its
+    /// world-space position and emission direction. The list is the
+    /// typed landing place for 3D-scene readers (glTF, USD, OBJ
+    /// importers) and the typed source for 3D-scene writers. The
+    /// 2D `RasterRenderer` (the vector-slice driver) ignores this
+    /// list entirely — light contribution to raster composition is
+    /// a separate follow-up.
+    ///
+    /// Empty by default. Ordering is preserved for round-trippability
+    /// but has no rendering semantics (lights are commutative under
+    /// the linear sum the renderer performs); writers may sort or
+    /// reorder freely.
+    pub lights: Vec<LightInstance>,
 }
 
 impl Default for Scene {
@@ -77,6 +93,7 @@ impl Default for Scene {
             audio: Vec::new(),
             metadata: Metadata::default(),
             pages: None,
+            lights: Vec::new(),
         }
     }
 }
@@ -340,6 +357,11 @@ impl Scene {
             self.audio.push(shifted);
         }
 
+        // Lights have no timeline component yet — copy verbatim.
+        // Per-light animation is a follow-up; for now, the world-space
+        // pose is constant for the lifetime of the scene.
+        self.lights.extend(other.lights.iter().cloned());
+
         // Extend our duration to cover any reach past the current end
         // for finite scenes. Indefinite stays indefinite.
         if let SceneDuration::Finite(end) = self.duration {
@@ -374,6 +396,43 @@ impl Scene {
     pub fn next_object_id(&self) -> ObjectId {
         let max = self.objects.iter().map(|o| o.id.raw()).max().unwrap_or(0);
         ObjectId::new(max.saturating_add(1).max(1))
+    }
+
+    /// Append a [`LightInstance`] to [`Self::lights`] and return its
+    /// index in the list. Convenience for incremental scene
+    /// construction.
+    pub fn push_light(&mut self, instance: LightInstance) -> usize {
+        let idx = self.lights.len();
+        self.lights.push(instance);
+        idx
+    }
+
+    /// `true` when [`Self::lights`] has at least one entry.
+    pub fn has_lights(&self) -> bool {
+        !self.lights.is_empty()
+    }
+
+    /// Iterate over every [`LightInstance`] of a given variant
+    /// (selected by the matching predicate). Use with the variant
+    /// predicates from [`crate::Light`]:
+    ///
+    /// ```
+    /// use oxideav_scene::Scene;
+    /// use oxideav_scene::light::{Light, LightCommon, LightInstance};
+    /// let mut s = Scene::default();
+    /// s.push_light(LightInstance::new(Light::Point {
+    ///     common: LightCommon::default(),
+    /// }));
+    /// let point_count = s.lights_filter(Light::is_point).count();
+    /// assert_eq!(point_count, 1);
+    /// ```
+    pub fn lights_filter<F>(&self, mut predicate: F) -> impl Iterator<Item = &LightInstance>
+    where
+        F: FnMut(&crate::light::Light) -> bool,
+    {
+        self.lights
+            .iter()
+            .filter(move |inst| predicate(&inst.light))
     }
 
     /// Union axis-aligned bounding box of every object live at time
@@ -1363,5 +1422,77 @@ mod tests {
         // Base (1,2) + animation (10,20) = (11,22).
         assert!((samples[0].transform.position.0 - 11.0).abs() < 1e-4);
         assert!((samples[0].transform.position.1 - 22.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn default_scene_has_no_lights() {
+        let s = Scene::default();
+        assert!(s.lights.is_empty());
+        assert!(!s.has_lights());
+    }
+
+    #[test]
+    fn push_light_appends_and_returns_index() {
+        use crate::light::{Light, LightCommon, LightInstance};
+        let mut s = Scene::default();
+        let i0 = s.push_light(LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        }));
+        let i1 = s.push_light(
+            LightInstance::new(Light::Point {
+                common: LightCommon::default(),
+            })
+            .with_position([5.0, 5.0, 0.0]),
+        );
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+        assert!(s.has_lights());
+        assert_eq!(s.lights.len(), 2);
+        assert_eq!(s.lights[1].position, [5.0, 5.0, 0.0]);
+    }
+
+    #[test]
+    fn lights_filter_selects_by_variant() {
+        use crate::light::{Light, LightCommon, LightInstance, SpotParams};
+        let mut s = Scene::default();
+        s.push_light(LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        }));
+        s.push_light(LightInstance::new(Light::Point {
+            common: LightCommon::default(),
+        }));
+        s.push_light(LightInstance::new(Light::Point {
+            common: LightCommon::default(),
+        }));
+        s.push_light(LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        }));
+        assert_eq!(s.lights_filter(Light::is_directional).count(), 1);
+        assert_eq!(s.lights_filter(Light::is_point).count(), 2);
+        assert_eq!(s.lights_filter(Light::is_spot).count(), 1);
+    }
+
+    #[test]
+    fn merge_concatenates_lights() {
+        use crate::light::{Light, LightCommon, LightInstance};
+        let mut a = Scene::default();
+        a.push_light(LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        }));
+        let mut b = Scene::default();
+        b.push_light(
+            LightInstance::new(Light::Point {
+                common: LightCommon::default(),
+            })
+            .with_position([1.0, 0.0, 0.0]),
+        );
+        b.push_light(LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        }));
+        a.merge(&b, 0, 0);
+        assert_eq!(a.lights.len(), 3);
+        // Position carried through verbatim from `b`.
+        assert_eq!(a.lights[1].position, [1.0, 0.0, 0.0]);
     }
 }

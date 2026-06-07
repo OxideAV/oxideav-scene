@@ -89,7 +89,7 @@ pub use audio::{AudioCue, AudioSource, DuckBus, Generator};
 pub use audio_mix::mix_cues;
 pub use duration::{Lifetime, SceneDuration, TimeStamp};
 pub use id::ObjectId;
-pub use light::{Light, LightCommon, SpotParams};
+pub use light::{Light, LightCommon, LightInstance, SpotParams};
 pub use object::{
     BlendMode, Canvas, ClipRect, Effect, ImageSource, LengthUnit, LiveStreamHandle, ObjectKind,
     Sample, SceneObject, Shape, TextRun, Transform, VideoSource,

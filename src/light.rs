@@ -273,6 +273,125 @@ impl Light {
     }
 }
 
+/// A typed [`Light`] paired with its world-space pose.
+///
+/// The bare [`Light`] primitive deliberately omits position and
+/// orientation — those live on the owning scene node. A
+/// [`LightInstance`] bridges that gap for callers that don't carry a
+/// full 3D node graph: it carries the light plus the two pieces of
+/// world-space pose information the punctual-light contract needs.
+///
+/// - [`position`](Self::position) — the light's world location, used
+///   by [`Light::Point`] and [`Light::Spot`]. Ignored for
+///   [`Light::Directional`], which is at infinity.
+/// - [`direction`](Self::direction) — the world-space emission
+///   direction, used by [`Light::Directional`] and [`Light::Spot`].
+///   Ignored for [`Light::Point`], which is omnidirectional. Stored
+///   as the actual emission direction (so a node whose `-z` axis
+///   has been rotated to `+x` carries `direction = [1, 0, 0]`); the
+///   default value `[0.0, 0.0, -1.0]` matches the spec's
+///   untransformed local emission axis.
+///
+/// The instance does NOT participate in the timeline-mode renderer
+/// (which is 2D vector / image composition). Renderers that consume
+/// 3D scene data — glTF importers and future 3D writers — read this
+/// list directly off [`Scene::lights`](crate::Scene::lights).
+///
+/// # Example
+///
+/// ```
+/// use oxideav_scene::light::{Light, LightCommon, LightInstance};
+///
+/// let key = LightInstance::new(Light::Directional {
+///     common: LightCommon::default(),
+/// });
+/// // Defaults are the untransformed scene-axis convention: at the
+/// // origin, emitting along the -z axis.
+/// assert_eq!(key.position, [0.0, 0.0, 0.0]);
+/// assert_eq!(key.direction, [0.0, 0.0, -1.0]);
+///
+/// let lamp = LightInstance::new(Light::Point {
+///     common: LightCommon::default(),
+/// })
+/// .with_position([3.0, 2.5, -1.0]);
+/// assert_eq!(lamp.position, [3.0, 2.5, -1.0]);
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct LightInstance {
+    pub light: Light,
+    /// World-space position. Used by [`Light::Point`] and
+    /// [`Light::Spot`]; ignored by [`Light::Directional`].
+    pub position: [f32; 3],
+    /// World-space emission direction. Used by [`Light::Directional`]
+    /// and [`Light::Spot`]; ignored by [`Light::Point`]. The default
+    /// value `[0.0, 0.0, -1.0]` matches the untransformed local
+    /// emission axis. Not required to be unit-length — see
+    /// [`normalized_direction`](Self::normalized_direction).
+    pub direction: [f32; 3],
+}
+
+impl LightInstance {
+    /// Construct an instance at the origin emitting along the
+    /// untransformed `-z` axis.
+    pub const fn new(light: Light) -> Self {
+        LightInstance {
+            light,
+            position: [0.0, 0.0, 0.0],
+            direction: [0.0, 0.0, -1.0],
+        }
+    }
+
+    /// Builder: replace the world-space position. Has no effect on
+    /// rendering for [`Light::Directional`].
+    pub fn with_position(mut self, position: [f32; 3]) -> Self {
+        self.position = position;
+        self
+    }
+
+    /// Builder: replace the world-space emission direction. Has no
+    /// effect on rendering for [`Light::Point`].
+    pub fn with_direction(mut self, direction: [f32; 3]) -> Self {
+        self.direction = direction;
+        self
+    }
+
+    /// `true` when [`position`](Self::position) is meaningful for
+    /// this instance's [`light`](Self::light) variant.
+    pub fn position_is_meaningful(&self) -> bool {
+        self.light.has_position()
+    }
+
+    /// `true` when [`direction`](Self::direction) is meaningful for
+    /// this instance's [`light`](Self::light) variant.
+    pub fn direction_is_meaningful(&self) -> bool {
+        self.light.has_direction()
+    }
+
+    /// Return the emission direction renormalised to unit length.
+    /// Returns `None` when the stored vector has length below `1e-12`
+    /// (degenerate) or when this instance's variant doesn't honour a
+    /// direction — callers can branch on the `None` case rather than
+    /// dividing by zero or producing NaNs.
+    pub fn normalized_direction(&self) -> Option<[f32; 3]> {
+        if !self.direction_is_meaningful() {
+            return None;
+        }
+        let [x, y, z] = self.direction;
+        let len_sq = x * x + y * y + z * z;
+        if !len_sq.is_finite() || len_sq < 1e-24 {
+            return None;
+        }
+        let inv = 1.0 / len_sq.sqrt();
+        Some([x * inv, y * inv, z * inv])
+    }
+}
+
+impl From<Light> for LightInstance {
+    fn from(light: Light) -> Self {
+        LightInstance::new(light)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,5 +538,102 @@ mod tests {
         l.common_mut().name.push_str("key");
         assert!((l.common().intensity - 7.5).abs() < 1e-6);
         assert_eq!(l.common().name, "key");
+    }
+
+    #[test]
+    fn light_instance_defaults_to_origin_and_minus_z() {
+        let inst = LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        });
+        assert_eq!(inst.position, [0.0, 0.0, 0.0]);
+        assert_eq!(inst.direction, [0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn light_instance_builders_override_pose() {
+        let inst = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        })
+        .with_position([1.0, 2.0, 3.0])
+        .with_direction([0.0, -1.0, 0.0]);
+        assert_eq!(inst.position, [1.0, 2.0, 3.0]);
+        assert_eq!(inst.direction, [0.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn light_instance_meaningfulness_tracks_variant() {
+        let dir = LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        });
+        assert!(!dir.position_is_meaningful());
+        assert!(dir.direction_is_meaningful());
+
+        let pt = LightInstance::new(Light::Point {
+            common: LightCommon::default(),
+        });
+        assert!(pt.position_is_meaningful());
+        assert!(!pt.direction_is_meaningful());
+
+        let sp = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        });
+        assert!(sp.position_is_meaningful());
+        assert!(sp.direction_is_meaningful());
+    }
+
+    #[test]
+    fn light_instance_normalized_direction_unit_length() {
+        let inst = LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        })
+        .with_direction([3.0, 0.0, -4.0]);
+        let n = inst.normalized_direction().expect("non-degenerate");
+        // (3, 0, -4) has length 5 → normalised to (0.6, 0.0, -0.8).
+        assert!((n[0] - 0.6).abs() < 1e-6);
+        assert!(n[1].abs() < 1e-6);
+        assert!((n[2] - (-0.8)).abs() < 1e-6);
+        // And the result is unit length.
+        let mag = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        assert!((mag - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn light_instance_normalized_direction_none_when_degenerate() {
+        let inst = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        })
+        .with_direction([0.0, 0.0, 0.0]);
+        assert!(inst.normalized_direction().is_none());
+
+        let nan = LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        })
+        .with_direction([f32::NAN, 0.0, 0.0]);
+        assert!(nan.normalized_direction().is_none());
+    }
+
+    #[test]
+    fn light_instance_normalized_direction_none_when_variant_ignores_it() {
+        // Point lights are omnidirectional → no meaningful direction
+        // even when the field carries a non-zero vector.
+        let inst = LightInstance::new(Light::Point {
+            common: LightCommon::default(),
+        })
+        .with_direction([1.0, 0.0, 0.0]);
+        assert!(inst.normalized_direction().is_none());
+    }
+
+    #[test]
+    fn from_light_wraps_at_origin() {
+        let l = Light::Point {
+            common: LightCommon::default(),
+        };
+        let inst: LightInstance = l.into();
+        assert_eq!(inst.position, [0.0, 0.0, 0.0]);
+        assert_eq!(inst.direction, [0.0, 0.0, -1.0]);
+        assert!(inst.light.is_point());
     }
 }

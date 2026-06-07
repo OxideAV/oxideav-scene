@@ -156,6 +156,29 @@ renderers. Encoding and file-format I/O are still follow-ups.
   enforces `0 ≤ inner < outer ≤ π/2`. Renderer-side integration is a
   follow-up — the type is exposed so 3D-scene importers have a typed
   landing place.
+- **`LightInstance` + `Scene::lights`** — typed pose-carrying wrapper
+  around `Light` plus a top-level list on `Scene`, so 3D-scene
+  importers / writers can round-trip a scene's lights without a full
+  3D node graph. `LightInstance` carries `light: Light`,
+  `position: [f32; 3]`, and `direction: [f32; 3]` (the world-space
+  emission direction; default `[0, 0, -1]` matches the untransformed
+  local emission axis the punctual-light contract documents).
+  Builders: `LightInstance::new(light)` constructs at the origin
+  emitting along `-z`; `with_position` / `with_direction` override
+  either pose component. `position_is_meaningful()` /
+  `direction_is_meaningful()` route through `Light::has_position` /
+  `has_direction` so callers can branch by variant;
+  `normalized_direction()` returns the unit-length direction (or
+  `None` when the stored vector is degenerate or the variant ignores
+  direction — `Point` lights are omnidirectional, so any stored
+  direction reads as `None`). `Scene::lights: Vec<LightInstance>` is
+  default-empty; helpers `push_light` / `has_lights` /
+  `lights_filter(predicate)` cover the common access patterns.
+  `Scene::merge` concatenates the other scene's lights verbatim
+  (no timeline component yet). The 2D `RasterRenderer` ignores this
+  list — light contribution to raster composition is follow-up
+  work; for now the field is the typed landing place for
+  glTF / USD / OBJ readers.
 - No `oxideav-codec` or container integration yet — that comes after
   the render pipeline is real.
 
@@ -174,6 +197,8 @@ pub struct Scene {
     pub objects: Vec<SceneObject>,    // z-ordered painter's algorithm
     pub audio: Vec<AudioCue>,         // triggered by timeline position
     pub metadata: Metadata,           // author / title / colour-space hints
+    pub pages: Option<Vec<Page>>,     // Some(_) → paged-content mode (PDF / TIFF / EPUB)
+    pub lights: Vec<LightInstance>,   // 3D punctual lights for scenes carrying 3D content
 }
 ```
 

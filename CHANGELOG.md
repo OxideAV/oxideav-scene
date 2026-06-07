@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LightInstance` (in `light` module) — typed pairing of a `Light`
+  primitive with its world-space pose, so 3D-scene importers /
+  writers have a single typed object to round-trip per light without
+  needing a full 3D node graph. Carries `light: Light`,
+  `position: [f32; 3]`, and `direction: [f32; 3]` (the world-space
+  emission direction, default `[0.0, 0.0, -1.0]` to match the
+  untransformed local emission axis the punctual-light contract
+  documents). Builders: `LightInstance::new(light)` constructs at the
+  origin emitting along `-z`; `with_position` / `with_direction`
+  override either pose component. Queries:
+  `position_is_meaningful()` / `direction_is_meaningful()` route
+  through the existing `Light::has_position` / `has_direction`
+  predicates so callers can branch by variant;
+  `normalized_direction()` returns the unit-length direction (or
+  `None` when the stored vector is degenerate or the variant ignores
+  direction — `Point` lights are omnidirectional, so any stored
+  direction reads as `None`). `From<Light>` wraps a bare light at
+  the origin. Re-exported at the crate root as `LightInstance`.
+
+- `Scene::lights: Vec<LightInstance>` — top-level field carrying the
+  scene's 3D punctual lights. Default-constructed scenes have an
+  empty vector. `Scene::merge` concatenates the other scene's lights
+  verbatim (no timeline component yet). Helpers: `Scene::push_light`
+  (append + return index), `Scene::has_lights`, and
+  `Scene::lights_filter(predicate)` which yields every instance whose
+  inner `Light` matches the supplied predicate (compose with the
+  variant predicates `Light::is_directional` / `Light::is_point` /
+  `Light::is_spot`). The 2D `RasterRenderer` ignores this list —
+  light contribution to raster composition is follow-up work; for
+  now the field is the typed landing place for glTF / USD / OBJ
+  readers and the typed source for 3D writers.
+
 - `light` module — typed punctual-light primitive (first 3D-adjacent
   surface). The `Light` enum has three variants — `Directional`,
   `Point`, `Spot` — each carrying a shared `LightCommon` block (name,
