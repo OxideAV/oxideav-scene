@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LightInstance::vector_to(world_point)` — geometric `(distance,
+  unit_direction)` from the light's world-space position to a world
+  point. The unit direction points *from* the light *towards* the
+  sample (so a renderer dots it against the emission axis to recover
+  the cosine of incidence); the companion distance feeds straight
+  into `Light::distance_attenuation`. Returns `None` for
+  `Light::Directional` (the light is at infinity — no finite
+  position to take the vector from; renderers should sample
+  `LightInstance::normalized_direction` instead), for coincident
+  geometry (sample point equal to the light position), and for any
+  non-finite component, so callers don't have to special-case the
+  div-by-zero / NaN paths.
+
+- `LightInstance::cone_attenuation(world_point)` — angular falloff
+  factor at a world point. For `Light::Spot` it implements the
+  cosine-interpolation formula documented in the punctual-light
+  contract's "Inner and Outer Cone Angles" section:
+  `scale = 1 / max(1e-3, cos(inner) - cos(outer))`,
+  `offset = -cos(outer) * scale`,
+  `cd = dot(spot_dir, normalize(world_point - position))`,
+  `angular = saturate(cd * scale + offset)`, then squared. The
+  `max(1e-3, …)` guard keeps the inner==outer degenerate cone
+  finite (collapses to a step function at the cone edge instead of
+  producing infinity). Returns `Some(1.0)` for `Light::Directional`
+  / `Light::Point` (no cone — directional has no falloff axis,
+  point is omnidirectional), so a renderer can multiply the cone
+  factor into a `(distance × cone)` product uniformly across
+  variants. Returns `None` only for spot lights when
+  `vector_to(world_point)` / `normalized_direction` already report
+  pathological geometry. 7 unit tests cover the on-axis /
+  past-outer / monotone-falloff / unit-for-non-spot /
+  inner-equals-outer-degenerate / pathological-geometry paths plus
+  the new `vector_to` accessor.
+
 - `LightInstance` (in `light` module) — typed pairing of a `Light`
   primitive with its world-space pose, so 3D-scene importers /
   writers have a single typed object to round-trip per light without

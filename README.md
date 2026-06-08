@@ -171,9 +171,20 @@ renderers. Encoding and file-format I/O are still follow-ups.
   `normalized_direction()` returns the unit-length direction (or
   `None` when the stored vector is degenerate or the variant ignores
   direction — `Point` lights are omnidirectional, so any stored
-  direction reads as `None`). `Scene::lights: Vec<LightInstance>` is
-  default-empty; helpers `push_light` / `has_lights` /
-  `lights_filter(predicate)` cover the common access patterns.
+  direction reads as `None`). `vector_to(world_point)` returns
+  `(distance, unit_direction)` from the light position to a world
+  point — `None` for the directional variant (the light is at
+  infinity) and for coincident / non-finite geometry, so renderers
+  don't have to special-case the div-by-zero / NaN paths.
+  `cone_attenuation(world_point)` returns the spot cone's angular
+  falloff per the punctual-light cosine-interpolation formula
+  (`scale = 1 / max(1e-3, cos(inner) - cos(outer))`,
+  `angular = saturate(cd * scale + offset)`, squared), returning
+  `Some(1.0)` for directional + point lights so consumers can fold
+  it into a `(distance × cone)` product uniformly across variants.
+  `Scene::lights: Vec<LightInstance>` is default-empty; helpers
+  `push_light` / `has_lights` / `lights_filter(predicate)` cover
+  the common access patterns.
   `Scene::merge` concatenates the other scene's lights verbatim
   (no timeline component yet). The 2D `RasterRenderer` ignores this
   list — light contribution to raster composition is follow-up

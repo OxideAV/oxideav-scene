@@ -384,6 +384,97 @@ impl LightInstance {
         let inv = 1.0 / len_sq.sqrt();
         Some([x * inv, y * inv, z * inv])
     }
+
+    /// Geometric vector from this instance's [`position`](Self::position)
+    /// to `world_point`, returned as `(distance, unit_direction)`.
+    ///
+    /// The unit direction points *from* the light *towards* the point —
+    /// i.e. it is the vector a renderer would dot against the light's
+    /// emission axis to find the cosine of incidence. The companion
+    /// distance feeds [`Light::distance_attenuation`].
+    ///
+    /// Returns `None` for:
+    ///
+    /// - [`Light::Directional`] — the light is at infinity, so there
+    ///   is no finite position to take the vector from. Renderers
+    ///   should sample the emission direction
+    ///   ([`normalized_direction`](Self::normalized_direction)) instead.
+    /// - A `world_point` coincident with the light's position (zero
+    ///   length, no meaningful direction).
+    /// - Any non-finite component (NaN / infinity) in either point.
+    pub fn vector_to(&self, world_point: [f32; 3]) -> Option<(f32, [f32; 3])> {
+        if !self.light.has_position() {
+            return None;
+        }
+        let dx = world_point[0] - self.position[0];
+        let dy = world_point[1] - self.position[1];
+        let dz = world_point[2] - self.position[2];
+        let len_sq = dx * dx + dy * dy + dz * dz;
+        if !len_sq.is_finite() || len_sq < 1e-24 {
+            return None;
+        }
+        let len = len_sq.sqrt();
+        let inv = 1.0 / len;
+        Some((len, [dx * inv, dy * inv, dz * inv]))
+    }
+
+    /// Angular attenuation factor at `world_point` for this light's
+    /// emission cone.
+    ///
+    /// Follows the recommended cosine-interpolation falloff documented
+    /// in the punctual-light contract for spot lights:
+    ///
+    /// ```text
+    /// light_angle_scale  = 1 / max(1e-3, cos(inner) - cos(outer))
+    /// light_angle_offset = -cos(outer) * light_angle_scale
+    /// cd                 = dot(spot_dir, normalize(world_point - position))
+    /// angular            = saturate(cd * scale + offset)
+    /// angular           *= angular
+    /// ```
+    ///
+    /// where `spot_dir` is the light's normalised emission direction
+    /// and `cd` is the cosine of the angle between the emission axis
+    /// and the vector from the light to the world point.
+    ///
+    /// Return contract by variant:
+    ///
+    /// - [`Light::Spot`] — the formula above, clamped to `[0.0, 1.0]`.
+    ///   `1.0` inside `inner_cone_angle`, decreasing to `0.0` at and
+    ///   beyond `outer_cone_angle`.
+    /// - [`Light::Directional`] / [`Light::Point`] — `1.0`. Directional
+    ///   lights have no cone (parallel rays); point lights are
+    ///   omnidirectional. Returning `1.0` for these matches the role
+    ///   of the cone factor in a `(distance * cone)` product — a
+    ///   non-spot light contributes its full distance-attenuated
+    ///   energy in every direction it reaches.
+    ///
+    /// Returns `None` when the world point is coincident with the spot
+    /// light's position, or when the stored emission direction is
+    /// degenerate — callers should treat that as "geometry too
+    /// pathological to shade" and skip the contribution rather than
+    /// substitute an arbitrary fallback.
+    pub fn cone_attenuation(&self, world_point: [f32; 3]) -> Option<f32> {
+        match &self.light {
+            Light::Directional { .. } | Light::Point { .. } => Some(1.0),
+            Light::Spot { spot, .. } => {
+                let spot_dir = self.normalized_direction()?;
+                let (_, to_point) = self.vector_to(world_point)?;
+                let cd = spot_dir[0] * to_point[0]
+                    + spot_dir[1] * to_point[1]
+                    + spot_dir[2] * to_point[2];
+                let cos_inner = spot.inner_cone_angle.cos();
+                let cos_outer = spot.outer_cone_angle.cos();
+                // `max(1e-3, …)` matches the documented reference
+                // formulation — guards the inner==outer degenerate case
+                // from a div-by-zero.
+                let denom = (cos_inner - cos_outer).max(1e-3);
+                let scale = 1.0 / denom;
+                let offset = -cos_outer * scale;
+                let angular = (cd * scale + offset).clamp(0.0, 1.0);
+                Some(angular * angular)
+            }
+        }
+    }
 }
 
 impl From<Light> for LightInstance {
@@ -624,6 +715,150 @@ mod tests {
         })
         .with_direction([1.0, 0.0, 0.0]);
         assert!(inst.normalized_direction().is_none());
+    }
+
+    #[test]
+    fn vector_to_returns_distance_and_unit_dir_for_point_light() {
+        let inst = LightInstance::new(Light::Point {
+            common: LightCommon::default(),
+        })
+        .with_position([1.0, 2.0, 3.0]);
+        // Point straight along +x by 5 units → distance 5, unit dir (1, 0, 0).
+        let (d, dir) = inst.vector_to([6.0, 2.0, 3.0]).expect("non-degenerate");
+        assert!((d - 5.0).abs() < 1e-6);
+        assert!((dir[0] - 1.0).abs() < 1e-6);
+        assert!(dir[1].abs() < 1e-6);
+        assert!(dir[2].abs() < 1e-6);
+        // (3, 4, 0) offset → distance 5, unit (0.6, 0.8, 0).
+        let (d, dir) = inst.vector_to([4.0, 6.0, 3.0]).expect("non-degenerate");
+        assert!((d - 5.0).abs() < 1e-6);
+        assert!((dir[0] - 0.6).abs() < 1e-6);
+        assert!((dir[1] - 0.8).abs() < 1e-6);
+        assert!(dir[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn vector_to_none_for_directional_light() {
+        // Directional lights are at infinity; vector_to is undefined.
+        let inst = LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        });
+        assert!(inst.vector_to([1.0, 2.0, 3.0]).is_none());
+    }
+
+    #[test]
+    fn vector_to_none_on_coincident_or_nonfinite_points() {
+        let inst = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        })
+        .with_position([1.0, 2.0, 3.0]);
+        // Coincident with the light.
+        assert!(inst.vector_to([1.0, 2.0, 3.0]).is_none());
+        // NaN poisons the squared length.
+        assert!(inst.vector_to([f32::NAN, 0.0, 0.0]).is_none());
+        // Infinity poisons the squared length.
+        assert!(inst.vector_to([f32::INFINITY, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn cone_attenuation_unity_for_directional_and_point() {
+        let d = LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        });
+        assert_eq!(d.cone_attenuation([1.0, 2.0, 3.0]), Some(1.0));
+
+        let p = LightInstance::new(Light::Point {
+            common: LightCommon::default(),
+        })
+        .with_position([0.0, 0.0, 0.0]);
+        assert_eq!(p.cone_attenuation([100.0, 50.0, 25.0]), Some(1.0));
+    }
+
+    #[test]
+    fn cone_attenuation_full_inside_inner_zero_past_outer() {
+        // Spot at origin aimed straight down -z (the default direction).
+        // Default inner = 0, outer = PI/4, so anything strictly inside
+        // the inner cone (i.e. exactly on the axis) returns 1.0, and
+        // anything beyond outer returns 0.0.
+        let s = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        });
+        // On-axis: world point at (0, 0, -10) → direction (0,0,-1) ==
+        // spot_dir → cd = 1, well past the inner cosine, saturates to 1.0.
+        let on_axis = s.cone_attenuation([0.0, 0.0, -10.0]).expect("on-axis");
+        assert!((on_axis - 1.0).abs() < 1e-6);
+        // Wide off-axis (90° from -z, in the xz plane): cd = 0 which is
+        // well past cos(outer) = cos(PI/4) ≈ 0.707, so saturated to 0.
+        let off_axis = s.cone_attenuation([10.0, 0.0, 0.0]).expect("off-axis");
+        assert_eq!(off_axis, 0.0);
+        // Behind the light: cd = -1, definitely zero.
+        let behind = s.cone_attenuation([0.0, 0.0, 10.0]).expect("behind");
+        assert_eq!(behind, 0.0);
+    }
+
+    #[test]
+    fn cone_attenuation_is_monotone_in_the_falloff_band() {
+        // Spot at origin, aimed at -z, with a wider cone so we get a
+        // meaningful interior falloff region.
+        let s = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::new(0.2, 1.0),
+        });
+        // Sample at angles 0.3, 0.5, 0.8 rad off-axis (xz plane). Each
+        // world point at distance 1 from origin: (sin θ, 0, -cos θ).
+        let attn = |theta: f32| {
+            s.cone_attenuation([theta.sin(), 0.0, -theta.cos()])
+                .expect("non-degenerate")
+        };
+        let a_near = attn(0.3);
+        let a_mid = attn(0.5);
+        let a_far = attn(0.8);
+        // Strictly decreasing across the falloff band.
+        assert!(a_near > a_mid, "{a_near} > {a_mid}");
+        assert!(a_mid > a_far, "{a_mid} > {a_far}");
+        // All in [0, 1].
+        for v in [a_near, a_mid, a_far] {
+            assert!((0.0..=1.0).contains(&v), "{v} out of [0, 1]");
+        }
+    }
+
+    #[test]
+    fn cone_attenuation_none_on_pathological_geometry() {
+        // Coincident point + spot light → vector_to None → cone None.
+        let s = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        })
+        .with_position([1.0, 1.0, 1.0]);
+        assert!(s.cone_attenuation([1.0, 1.0, 1.0]).is_none());
+
+        // Degenerate emission direction → normalized_direction None →
+        // cone None.
+        let s = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::default(),
+        })
+        .with_direction([0.0, 0.0, 0.0]);
+        assert!(s.cone_attenuation([10.0, 10.0, 10.0]).is_none());
+    }
+
+    #[test]
+    fn cone_attenuation_handles_inner_equals_outer_degenerate() {
+        // Degenerate but constructible cone: inner == outer. The
+        // formula's `max(1e-3, …)` guard keeps the result finite; the
+        // resulting falloff is a step function at the cone edge.
+        let s = LightInstance::new(Light::Spot {
+            common: LightCommon::default(),
+            spot: SpotParams::new(0.3, 0.3),
+        });
+        // On-axis: still saturates to 1.0.
+        let on_axis = s.cone_attenuation([0.0, 0.0, -1.0]).expect("on-axis");
+        assert!((on_axis - 1.0).abs() < 1e-6);
+        // Well outside the cone: 0.
+        let outside = s.cone_attenuation([1.0, 0.0, 0.0]).expect("outside");
+        assert_eq!(outside, 0.0);
     }
 
     #[test]
