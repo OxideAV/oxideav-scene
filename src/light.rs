@@ -477,6 +477,90 @@ impl LightInstance {
     }
 }
 
+/// The light's per-channel linear-RGB contribution arriving at a world
+/// point, folding every attenuation factor the punctual-light contract
+/// defines into one result a renderer can multiply against a surface's
+/// reflectance.
+///
+/// The composition is, per channel `c`:
+///
+/// ```text
+/// L_c = color[c] * intensity * distance_attenuation * cone_attenuation
+/// ```
+///
+/// where `distance_attenuation` and `cone_attenuation` come from the
+/// already-documented helpers on this type and on [`Light`]:
+///
+/// - **distance** — `1.0` for [`Light::Directional`] (the light is at
+///   infinity and is not attenuated; its illuminance is the same at
+///   every point); otherwise the inverse-square law with the optional
+///   `range`-cutoff window the contract recommends.
+/// - **cone** — `1.0` for [`Light::Directional`] / [`Light::Point`];
+///   the cosine-interpolated angular falloff for [`Light::Spot`].
+///
+/// Return contract:
+///
+/// - [`Light::Directional`] always returns `Some(color * intensity)` —
+///   parallel rays reach every world point with the same energy, so the
+///   coordinate is ignored.
+/// - [`Light::Point`] / [`Light::Spot`] return `Some([...])` scaled by
+///   the distance (and, for spots, cone) attenuation at `world_point`.
+///   When a finite `range` is configured and the point lies beyond it,
+///   the distance window has already driven the factor to `0.0`, so the
+///   result is the zero triple — the contract requires the light to be
+///   considered to have no effect past `range`.
+/// - `None` when the geometry is too degenerate to shade: a non-finite
+///   coordinate, or a `world_point` coincident with a positional
+///   light's position (the direction / inverse-square term is
+///   undefined). Callers should skip the contribution rather than
+///   substitute an arbitrary value. Directional lights never hit this
+///   case (they have no position).
+///
+/// Note the result is *not* clamped to `[0, 1]` per channel: the
+/// inverse-square term and the `intensity` are physical and can exceed
+/// unity (a bright light close to a surface). Tone-mapping / exposure
+/// is the consumer's responsibility.
+impl LightInstance {
+    pub fn irradiance_at(&self, world_point: [f32; 3]) -> Option<[f32; 3]> {
+        let common = self.light.common();
+        let base = common.intensity;
+
+        let distance = if self.light.has_position() {
+            // A positional light needs a finite, non-coincident vector
+            // to the point or the inverse-square / cone terms are
+            // undefined; `vector_to` already screens NaN / coincidence.
+            let (dist, _) = self.vector_to(world_point)?;
+            dist
+        } else {
+            // Directional: no position, no positional attenuation.
+            // Guard only against a non-finite query coordinate so a
+            // caller passing garbage gets `None` rather than a NaN
+            // triple silently flowing downstream.
+            if !world_point.iter().all(|c| c.is_finite()) {
+                return None;
+            }
+            // The distance argument is ignored by `distance_attenuation`
+            // for the directional variant (it returns `1.0`), so any
+            // finite placeholder works.
+            0.0
+        };
+
+        let dist_att = self.light.distance_attenuation(distance);
+        // `cone_attenuation` returns `None` for the same degenerate
+        // geometry `vector_to` rejects; for a positional light we have
+        // already passed that gate above, but a spot can still trip the
+        // degenerate-direction branch, so propagate the `None`.
+        let cone_att = self.cone_attenuation(world_point)?;
+
+        let scale = base * dist_att * cone_att;
+        Some([
+            common.color[0] * scale,
+            common.color[1] * scale,
+            common.color[2] * scale,
+        ])
+    }
+}
+
 impl From<Light> for LightInstance {
     fn from(light: Light) -> Self {
         LightInstance::new(light)
@@ -870,5 +954,155 @@ mod tests {
         assert_eq!(inst.position, [0.0, 0.0, 0.0]);
         assert_eq!(inst.direction, [0.0, 0.0, -1.0]);
         assert!(inst.light.is_point());
+    }
+
+    #[test]
+    fn irradiance_directional_is_color_times_intensity_everywhere() {
+        // Directional light: illuminance is constant at every point and
+        // the position argument is ignored. color * intensity.
+        let inst = LightInstance::new(Light::Directional {
+            common: LightCommon {
+                color: [0.2, 0.4, 0.8],
+                intensity: 3.0,
+                ..LightCommon::default()
+            },
+        });
+        let near = inst.irradiance_at([0.0, 0.0, -1.0]).expect("finite");
+        let far = inst.irradiance_at([100.0, -50.0, 25.0]).expect("finite");
+        // Same energy regardless of where the point is.
+        assert_eq!(near, far);
+        assert!((near[0] - 0.6).abs() < 1e-6); // 0.2 * 3
+        assert!((near[1] - 1.2).abs() < 1e-6); // 0.4 * 3
+        assert!((near[2] - 2.4).abs() < 1e-6); // 0.8 * 3
+    }
+
+    #[test]
+    fn irradiance_directional_none_on_nonfinite_query() {
+        let inst = LightInstance::new(Light::Directional {
+            common: LightCommon::default(),
+        });
+        assert!(inst.irradiance_at([f32::NAN, 0.0, 0.0]).is_none());
+        assert!(inst.irradiance_at([0.0, f32::INFINITY, 0.0]).is_none());
+    }
+
+    #[test]
+    fn irradiance_point_follows_inverse_square() {
+        // White point light, intensity 4, at the origin, no range.
+        let inst = LightInstance::new(Light::Point {
+            common: LightCommon {
+                intensity: 4.0,
+                ..LightCommon::default()
+            },
+        });
+        // At distance 2: 4 * (1/4) = 1.0 per channel (white).
+        let at2 = inst.irradiance_at([2.0, 0.0, 0.0]).expect("finite");
+        for c in at2 {
+            assert!((c - 1.0).abs() < 1e-6, "{c}");
+        }
+        // At distance 4: 4 * (1/16) = 0.25 per channel — a quarter of
+        // the distance-2 value, confirming the inverse-square law.
+        let at4 = inst.irradiance_at([0.0, 0.0, 4.0]).expect("finite");
+        for c in at4 {
+            assert!((c - 0.25).abs() < 1e-6, "{c}");
+        }
+    }
+
+    #[test]
+    fn irradiance_point_color_tints_each_channel() {
+        let inst = LightInstance::new(Light::Point {
+            common: LightCommon {
+                color: [1.0, 0.5, 0.0],
+                intensity: 4.0,
+                ..LightCommon::default()
+            },
+        });
+        // distance 2 → scale = 4 * 0.25 = 1.0, so result == color.
+        let r = inst.irradiance_at([2.0, 0.0, 0.0]).expect("finite");
+        assert!((r[0] - 1.0).abs() < 1e-6);
+        assert!((r[1] - 0.5).abs() < 1e-6);
+        assert!(r[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn irradiance_point_zero_at_and_past_range() {
+        let inst = LightInstance::new(Light::Point {
+            common: LightCommon {
+                range: Some(10.0),
+                ..LightCommon::default()
+            },
+        });
+        // At range, the distance window is exactly zero → zero triple.
+        let at_range = inst.irradiance_at([10.0, 0.0, 0.0]).expect("finite");
+        assert_eq!(at_range, [0.0, 0.0, 0.0]);
+        // Past range, still zero (window clamps to 0).
+        let past = inst.irradiance_at([0.0, 15.0, 0.0]).expect("finite");
+        assert_eq!(past, [0.0, 0.0, 0.0]);
+        // Inside range, strictly positive.
+        let inside = inst.irradiance_at([0.0, 0.0, 5.0]).expect("finite");
+        assert!(inside.iter().all(|&c| c > 0.0));
+    }
+
+    #[test]
+    fn irradiance_point_none_on_coincident_or_nonfinite() {
+        let inst = LightInstance::new(Light::Point {
+            common: LightCommon::default(),
+        })
+        .with_position([1.0, 2.0, 3.0]);
+        // Coincident with the light → vector_to None → irradiance None.
+        assert!(inst.irradiance_at([1.0, 2.0, 3.0]).is_none());
+        // Non-finite query coordinate.
+        assert!(inst.irradiance_at([f32::NAN, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn irradiance_spot_folds_distance_and_cone() {
+        // Spot at origin aimed down -z, intensity 4, default cone.
+        let inst = LightInstance::new(Light::Spot {
+            common: LightCommon {
+                intensity: 4.0,
+                ..LightCommon::default()
+            },
+            spot: SpotParams::default(),
+        });
+        // On-axis at distance 2: cone = 1.0, distance = 1/4, so
+        // 4 * 0.25 * 1.0 = 1.0 per channel.
+        let on_axis = inst.irradiance_at([0.0, 0.0, -2.0]).expect("finite");
+        for c in on_axis {
+            assert!((c - 1.0).abs() < 1e-6, "{c}");
+        }
+        // Just past the outer cone (90° off-axis): cone = 0 → zero
+        // triple even though the distance term is non-zero. This is the
+        // product of the two attenuations the irradiance helper folds.
+        let off = inst.irradiance_at([2.0, 0.0, 0.0]).expect("finite");
+        assert_eq!(off, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn irradiance_equals_manual_product_of_factors() {
+        // Cross-check the folded result against the individual helpers
+        // so the composition stays in lock-step with its parts.
+        let inst = LightInstance::new(Light::Spot {
+            common: LightCommon {
+                color: [0.3, 0.6, 0.9],
+                intensity: 2.5,
+                range: Some(20.0),
+                ..LightCommon::default()
+            },
+            spot: SpotParams::new(0.2, 1.0),
+        })
+        .with_position([0.0, 0.0, 0.0])
+        .with_direction([0.0, 0.0, -1.0]);
+
+        let p = [0.4_f32, 0.0, -3.0];
+        let (dist, _) = inst.vector_to(p).expect("finite");
+        let da = inst.light.distance_attenuation(dist);
+        let ca = inst.cone_attenuation(p).expect("finite");
+        let scale = 2.5 * da * ca;
+        let expected = [0.3 * scale, 0.6 * scale, 0.9 * scale];
+
+        let got = inst.irradiance_at(p).expect("finite");
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert!((g - e).abs() < 1e-6, "{g} vs {e}");
+        }
     }
 }

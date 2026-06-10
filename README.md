@@ -182,6 +182,18 @@ renderers. Encoding and file-format I/O are still follow-ups.
   `angular = saturate(cd * scale + offset)`, squared), returning
   `Some(1.0)` for directional + point lights so consumers can fold
   it into a `(distance × cone)` product uniformly across variants.
+  `irradiance_at(world_point)` folds the whole composition into one
+  per-channel linear-RGB triple a renderer multiplies against a
+  surface's reflectance:
+  `L_c = color[c] × intensity × distance_attenuation × cone_attenuation`.
+  Directional lights return `Some(color × intensity)` at every point
+  (un-attenuated parallel rays); point / spot lights scale that base
+  by the inverse-square distance window (a point beyond `range` yields
+  the zero triple) and, for spots, the cone falloff. Returns `None`
+  for geometry too degenerate to shade (non-finite query, or a point
+  coincident with a positional light), and is deliberately unclamped
+  (physical inverse-square × intensity can exceed unity — tone-mapping
+  is the consumer's job).
   `Scene::lights: Vec<LightInstance>` is default-empty; helpers
   `push_light` / `has_lights` / `lights_filter(predicate)` cover
   the common access patterns.

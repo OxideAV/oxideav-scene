@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LightInstance::irradiance_at(world_point)` — the light's per-channel
+  linear-RGB contribution arriving at a world point, folding every
+  attenuation factor the punctual-light contract defines into one
+  result a renderer multiplies against a surface's reflectance:
+  `L_c = color[c] * intensity * distance_attenuation * cone_attenuation`.
+  `Light::Directional` returns `Some(color * intensity)` at every point
+  (parallel rays from infinity, position-independent and
+  un-attenuated); `Light::Point` / `Light::Spot` scale that base by the
+  inverse-square distance term (with the optional `range`-cutoff window,
+  so a point beyond `range` yields the zero triple) and, for spots, the
+  cosine-interpolated cone falloff. Returns `None` on geometry too
+  degenerate to shade — a non-finite query coordinate, or a point
+  coincident with a positional light's position. The result is
+  intentionally not clamped to `[0, 1]`: the inverse-square term and
+  `intensity` are physical and may exceed unity, leaving tone-mapping to
+  the consumer. This is the single landing place 3D-scene importers /
+  renderers call to sample a light's energy without re-deriving the
+  composition from the individual attenuation helpers.
+
 - `LightInstance::vector_to(world_point)` — geometric `(distance,
   unit_direction)` from the light's world-space position to a world
   point. The unit direction points *from* the light *towards* the
