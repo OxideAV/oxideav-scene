@@ -202,6 +202,37 @@ renderers. Encoding and file-format I/O are still follow-ups.
   list — light contribution to raster composition is follow-up
   work; for now the field is the typed landing place for
   glTF / USD / OBJ readers.
+- **`Material` + `Scene::materials`** — typed PBR material surface in
+  the `material` module, the companion to the punctual lights: where
+  a light describes the energy arriving at a surface
+  (`LightInstance::irradiance_at`), a `Material` describes how the
+  surface responds. Metallic-roughness model per the glTF 2.0 core
+  specification, defaults tracking the spec exactly:
+  `PbrMetallicRoughness` carries the linear-RGBA `base_color_factor`
+  (default white), `metallic_factor` / `roughness_factor` (default
+  `1.0` each), and optional base-color / packed metallic-roughness
+  texture slots; `Material` wraps it with `emissive_factor`
+  (default zero) + emissive / tangent-space normal / occlusion
+  texture slots, an `AlphaMode` (`Opaque` default, `Mask { cutoff }`
+  binary at the inclusive cutoff, `Blend` clamped — resolved by
+  `coverage(alpha)`), and `double_sided`. Texture slots are opaque
+  `TextureBinding`s (index into a caller-managed texture table +
+  `TEXCOORD` set, plus per-slot normal `scale` / occlusion
+  `strength`) — the scene crate never owns texture pixels. The
+  spec-defined derived BRDF inputs are methods so every consumer
+  derives them identically: `diffuse_color()`
+  (`base.rgb × (1 − metallic)`), `f0()`
+  (`lerp(0.04, base.rgb, metallic)`), `alpha_roughness()`
+  (`roughness²`), `fresnel(v_dot_h)` (per-channel Schlick).
+  `is_valid()` range-checks every factor; `is_emissive()` /
+  `is_textured()` / `base_coverage()` cover the common consumer
+  branches. `Scene::materials: Vec<Material>` is the default-empty
+  palette (helpers `push_material` / `has_materials`;
+  `Scene::merge` concatenates verbatim — nothing references entries
+  by index yet, mesh objects carrying a material index are a
+  follow-up). The 2D `RasterRenderer` ignores the palette; like
+  `Light` before it, the type is the landing place for 3D-scene
+  importers / writers.
 - No `oxideav-codec` or container integration yet — that comes after
   the render pipeline is real.
 
@@ -222,6 +253,7 @@ pub struct Scene {
     pub metadata: Metadata,           // author / title / colour-space hints
     pub pages: Option<Vec<Page>>,     // Some(_) → paged-content mode (PDF / TIFF / EPUB)
     pub lights: Vec<LightInstance>,   // 3D punctual lights for scenes carrying 3D content
+    pub materials: Vec<Material>,     // PBR material palette for 3D round-trips
 }
 ```
 
@@ -570,7 +602,10 @@ src/
 ├── id.rs            — ObjectId (stable, editable)
 ├── ops.rs           — Operation enum for the streaming compositor
 ├── page.rs          — Page (paged-content / PDF mode)
-└── paint.rs         — Paint + Gradient (multi-stop linear / radial)
+├── paint.rs         — Paint + Gradient (multi-stop linear / radial)
+├── light.rs         — Light / LightInstance (3D punctual lights)
+├── material.rs      — Material / PbrMetallicRoughness / AlphaMode (3D PBR palette)
+└── svg_path.rs      — SVG 1.1 path-data string → oxideav_core::Path
 ```
 
 Everything is `pub` and `#[non_exhaustive]` on public enums so new

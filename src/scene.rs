@@ -9,6 +9,7 @@ use crate::audio::AudioCue;
 use crate::duration::{Lifetime, SceneDuration, TimeStamp};
 use crate::id::ObjectId;
 use crate::light::LightInstance;
+use crate::material::Material;
 use crate::object::{Canvas, SceneObject};
 use crate::ops::Operation;
 use crate::page::Page;
@@ -78,6 +79,20 @@ pub struct Scene {
     /// the linear sum the renderer performs); writers may sort or
     /// reorder freely.
     pub lights: Vec<LightInstance>,
+    /// Material palette for scenes that carry 3D content.
+    ///
+    /// The companion list to [`Self::lights`]: where a light
+    /// describes the energy arriving at a surface, a
+    /// [`crate::Material`] describes how the surface responds
+    /// (metallic-roughness model). The list is a palette — nothing
+    /// in the 2D object model references entries yet (mesh objects
+    /// referencing a material by index are a follow-up), so it is
+    /// pure round-trip storage for 3D-scene readers / writers. The
+    /// 2D `RasterRenderer` ignores it entirely.
+    ///
+    /// Empty by default. Ordering is preserved verbatim so importers
+    /// can keep their source indices stable across a round-trip.
+    pub materials: Vec<Material>,
 }
 
 impl Default for Scene {
@@ -94,6 +109,7 @@ impl Default for Scene {
             metadata: Metadata::default(),
             pages: None,
             lights: Vec::new(),
+            materials: Vec::new(),
         }
     }
 }
@@ -362,6 +378,12 @@ impl Scene {
         // pose is constant for the lifetime of the scene.
         self.lights.extend(other.lights.iter().cloned());
 
+        // Materials are a palette with no index references from the
+        // object model yet — copy verbatim. When mesh objects gain a
+        // material index, merge will need to rebase those indices by
+        // `self.materials.len()` before extending.
+        self.materials.extend(other.materials.iter().cloned());
+
         // Extend our duration to cover any reach past the current end
         // for finite scenes. Indefinite stays indefinite.
         if let SceneDuration::Finite(end) = self.duration {
@@ -410,6 +432,21 @@ impl Scene {
     /// `true` when [`Self::lights`] has at least one entry.
     pub fn has_lights(&self) -> bool {
         !self.lights.is_empty()
+    }
+
+    /// Append a [`Material`] to the [`Self::materials`] palette and
+    /// return its index in the list. Convenience for incremental
+    /// scene construction — importers record the returned index to
+    /// keep their source material table aligned.
+    pub fn push_material(&mut self, material: Material) -> usize {
+        let idx = self.materials.len();
+        self.materials.push(material);
+        idx
+    }
+
+    /// `true` when [`Self::materials`] has at least one entry.
+    pub fn has_materials(&self) -> bool {
+        !self.materials.is_empty()
     }
 
     /// Iterate over every [`LightInstance`] of a given variant

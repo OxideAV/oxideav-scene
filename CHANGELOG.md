@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `material` module — typed PBR material surface, the companion to
+  the `light` module: where lights describe the energy arriving at a
+  surface, a `Material` describes how the surface responds. The model
+  is metallic-roughness per the glTF 2.0 core specification (treated
+  as the canonical clean-room contract, mirroring the lights
+  bring-up). Types: `PbrMetallicRoughness` (linear-RGBA
+  `base_color_factor`, `metallic_factor`, `roughness_factor`, plus
+  base-color and packed metallic-roughness texture slots),
+  `Material` (PBR block + `emissive_factor` / emissive texture +
+  tangent-space normal and occlusion texture slots + `alpha_mode` +
+  `double_sided`), `AlphaMode` (`Opaque` / `Mask { cutoff }` /
+  `Blend` with `coverage(alpha)` resolving a raw alpha into the
+  rendered coverage — opaque ignores, mask is binary at the
+  inclusive cutoff, blend clamps), and `TextureBinding` /
+  `NormalTextureBinding` / `OcclusionTextureBinding` (opaque indices
+  into a caller-managed texture table + `texcoord` set, with the
+  per-slot `scale` / `strength` scalars). All defaults track the
+  spec's documented defaults exactly. Spec-defined derived BRDF
+  inputs are exposed as methods so every consumer derives them
+  identically: `diffuse_color()` (`c_diff = base.rgb × (1 −
+  metallic)`), `f0()` (`lerp(0.04, base.rgb, metallic)` — the fixed
+  4% dielectric reflectance is `DIELECTRIC_F0`),
+  `alpha_roughness()` (`roughness²`), and `fresnel(v_dot_h)`
+  (per-channel Schlick `f0 + (1 − f0)(1 − |V·H|)⁵`). Validation:
+  `Material::is_valid()` / `PbrMetallicRoughness::is_valid()` /
+  `AlphaMode::is_valid()` / `OcclusionTextureBinding::is_valid()`
+  range-check every factor; `is_emissive()` / `is_textured()` /
+  `base_coverage()` cover the common consumer branches. 13 unit
+  tests + a module doctest cover defaults, validation, alpha
+  coverage semantics, and the dielectric / metallic interpolation
+  endpoints. Renderer-side integration is a follow-up — the type is
+  the landing place for 3D-scene importers, like `Light` before it.
+
+- `Scene::materials: Vec<Material>` — material palette on the scene
+  root, the companion list to `Scene::lights`. Pure round-trip
+  storage for 3D-scene readers / writers (nothing in the 2D object
+  model references entries yet; mesh objects carrying a material
+  index are a follow-up — `Scene::merge` will need to rebase those
+  indices when they appear, and currently concatenates the palettes
+  verbatim). Helpers: `push_material` (returns the new entry's
+  index) and `has_materials`. Default-empty, so existing scenes are
+  unaffected.
+
 - `LightInstance::irradiance_at(world_point)` — the light's per-channel
   linear-RGB contribution arriving at a world point, folding every
   attenuation factor the punctual-light contract defines into one
