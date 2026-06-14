@@ -449,6 +449,73 @@ impl Scene {
         !self.materials.is_empty()
     }
 
+    /// Number of entries in the [`Self::materials`] palette — the
+    /// exclusive upper bound for a material index.
+    pub fn material_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    /// Resolve a material index into the [`Self::materials`] palette,
+    /// returning `None` when the index is out of range.
+    ///
+    /// This is the index-side counterpart to [`Self::push_material`]:
+    /// an importer records the index `push_material` hands back when it
+    /// reads a mesh's material reference, then a writer / renderer
+    /// resolves that stored index here. Bounds are checked so a stale
+    /// or malformed index from an external file can't panic — callers
+    /// get `None` and decide how to fall back (e.g. the spec's
+    /// all-defaults material).
+    ///
+    /// ```
+    /// use oxideav_scene::Scene;
+    /// use oxideav_scene::material::Material;
+    /// let mut s = Scene::default();
+    /// let idx = s.push_material(Material::named("brass"));
+    /// assert_eq!(s.material(idx).map(|m| m.name.as_str()), Some("brass"));
+    /// assert!(s.material(idx + 1).is_none());
+    /// ```
+    pub fn material(&self, index: usize) -> Option<&Material> {
+        self.materials.get(index)
+    }
+
+    /// Mutable counterpart to [`Self::material`] — resolve a material
+    /// index for in-place edits (e.g. retargeting a texture binding
+    /// after an importer relocates its texture table). Returns `None`
+    /// for an out-of-range index.
+    pub fn material_mut(&mut self, index: usize) -> Option<&mut Material> {
+        self.materials.get_mut(index)
+    }
+
+    /// Iterate over every [`Material`] in the palette that satisfies a
+    /// predicate, paired with its palette index. Mirrors
+    /// [`Self::lights_filter`] for the material side; the index is
+    /// yielded so a caller selecting (say) every emissive material can
+    /// resolve each one back through [`Self::material`] or hand the
+    /// index to a writer.
+    ///
+    /// ```
+    /// use oxideav_scene::Scene;
+    /// use oxideav_scene::material::Material;
+    /// let mut s = Scene::default();
+    /// s.push_material(Material::default());
+    /// s.push_material(Material {
+    ///     emissive_factor: [1.0, 0.0, 0.0],
+    ///     ..Material::default()
+    /// });
+    /// let emissive: Vec<usize> =
+    ///     s.materials_filter(Material::is_emissive).map(|(i, _)| i).collect();
+    /// assert_eq!(emissive, vec![1]);
+    /// ```
+    pub fn materials_filter<F>(&self, mut predicate: F) -> impl Iterator<Item = (usize, &Material)>
+    where
+        F: FnMut(&Material) -> bool,
+    {
+        self.materials
+            .iter()
+            .enumerate()
+            .filter(move |(_, m)| predicate(m))
+    }
+
     /// Iterate over every [`LightInstance`] of a given variant
     /// (selected by the matching predicate). Use with the variant
     /// predicates from [`crate::Light`]:
@@ -1531,5 +1598,90 @@ mod tests {
         assert_eq!(a.lights.len(), 3);
         // Position carried through verbatim from `b`.
         assert_eq!(a.lights[1].position, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn default_scene_has_no_materials() {
+        let s = Scene::default();
+        assert!(s.materials.is_empty());
+        assert!(!s.has_materials());
+        assert_eq!(s.material_count(), 0);
+        assert!(s.material(0).is_none());
+    }
+
+    #[test]
+    fn push_material_appends_and_returns_index() {
+        let mut s = Scene::default();
+        let i0 = s.push_material(Material::named("a"));
+        let i1 = s.push_material(Material::named("b"));
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+        assert!(s.has_materials());
+        assert_eq!(s.material_count(), 2);
+    }
+
+    #[test]
+    fn material_index_resolves_and_bounds_check() {
+        let mut s = Scene::default();
+        let idx = s.push_material(Material::named("brass"));
+        assert_eq!(s.material(idx).map(|m| m.name.as_str()), Some("brass"));
+        // One past the end → None, no panic.
+        assert!(s.material(idx + 1).is_none());
+        assert!(s.material(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn material_mut_edits_in_place() {
+        let mut s = Scene::default();
+        let idx = s.push_material(Material::named("dull"));
+        {
+            let m = s.material_mut(idx).expect("index in range");
+            m.pbr.metallic_factor = 0.0;
+            m.name = "polished".into();
+        }
+        let m = s.material(idx).unwrap();
+        assert_eq!(m.name, "polished");
+        assert_eq!(m.pbr.metallic_factor, 0.0);
+        assert!(s.material_mut(idx + 1).is_none());
+    }
+
+    #[test]
+    fn materials_filter_yields_index_and_ref() {
+        let mut s = Scene::default();
+        s.push_material(Material::default()); // not emissive
+        s.push_material(Material {
+            emissive_factor: [1.0, 0.0, 0.0],
+            ..Material::default()
+        });
+        s.push_material(Material {
+            emissive_factor: [0.0, 0.5, 0.0],
+            ..Material::default()
+        });
+        let emissive: Vec<usize> = s
+            .materials_filter(Material::is_emissive)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(emissive, vec![1, 2]);
+        // The yielded reference points at the same palette entry.
+        let (first_idx, first_mat) = s.materials_filter(Material::is_emissive).next().unwrap();
+        assert_eq!(first_idx, 1);
+        assert_eq!(first_mat.emissive_factor, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn merge_concatenates_materials() {
+        let mut a = Scene::default();
+        a.push_material(Material::named("a0"));
+        let mut b = Scene::default();
+        b.push_material(Material::named("b0"));
+        b.push_material(Material::named("b1"));
+        a.merge(&b, 0, 0);
+        assert_eq!(a.material_count(), 3);
+        // The base palette's indices are preserved; the merged
+        // palette is appended after, so a caller rebasing external
+        // index references adds the base length (here 1).
+        assert_eq!(a.material(0).map(|m| m.name.as_str()), Some("a0"));
+        assert_eq!(a.material(1).map(|m| m.name.as_str()), Some("b0"));
+        assert_eq!(a.material(2).map(|m| m.name.as_str()), Some("b1"));
     }
 }

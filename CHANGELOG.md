@@ -52,6 +52,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index) and `has_materials`. Default-empty, so existing scenes are
   unaffected.
 
+- Indexed material-palette accessors on `Scene` — the index-side
+  counterpart to `push_material`, so the palette is now actually
+  referenceable by the index that `push_material` hands back:
+  `material(index)` / `material_mut(index)` (bounds-checked
+  `Option` lookup — an out-of-range index returns `None` instead of
+  panicking, so a stale / malformed index from an external file is
+  safe), `material_count()` (the exclusive index bound), and
+  `materials_filter(predicate)` (mirrors `lights_filter`, yielding
+  `(index, &Material)` so a caller can select e.g. every emissive
+  material and resolve each back through `material` or hand the
+  index to a writer). 6 unit tests cover the empty default, append +
+  index return, bounds checking (one-past-end and `usize::MAX`),
+  in-place mutation, the filter's `(index, &Material)` pairing, and
+  index preservation across `merge`.
+
 - `LightInstance::irradiance_at(world_point)` — the light's per-channel
   linear-RGB contribution arriving at a world point, folding every
   attenuation factor the punctual-light contract defines into one

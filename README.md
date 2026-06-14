@@ -227,10 +227,19 @@ renderers. Encoding and file-format I/O are still follow-ups.
   `is_valid()` range-checks every factor; `is_emissive()` /
   `is_textured()` / `base_coverage()` cover the common consumer
   branches. `Scene::materials: Vec<Material>` is the default-empty
-  palette (helpers `push_material` / `has_materials`;
-  `Scene::merge` concatenates verbatim — nothing references entries
-  by index yet, mesh objects carrying a material index are a
-  follow-up). The 2D `RasterRenderer` ignores the palette; like
+  palette. Construction + access helpers: `push_material` (append,
+  returns the new index) / `has_materials` / `material_count` (the
+  exclusive index bound) / `material(index)` + `material_mut(index)`
+  (bounds-checked indexed lookup — `None` for an out-of-range index,
+  so a stale index from an external file can't panic) /
+  `materials_filter(predicate)` (mirrors `lights_filter`, yielding
+  `(index, &Material)` so callers can select e.g. every emissive
+  material and resolve it back through `material`). `Scene::merge`
+  concatenates the palettes verbatim, preserving the base scene's
+  indices (the merged entries append after, so a caller rebasing
+  external index references adds the base `material_count`); a mesh
+  object carrying a material index in the object model is still a
+  follow-up. The 2D `RasterRenderer` ignores the palette; like
   `Light` before it, the type is the landing place for 3D-scene
   importers / writers.
 - No `oxideav-codec` or container integration yet — that comes after
