@@ -67,6 +67,7 @@ pub mod duration;
 pub mod id;
 pub mod light;
 pub mod material;
+pub mod node;
 pub mod object;
 pub mod ops;
 pub mod page;
@@ -95,6 +96,7 @@ pub use material::{
     AlphaMode, Material, NormalTextureBinding, OcclusionTextureBinding, PbrMetallicRoughness,
     TextureBinding,
 };
+pub use node::{Mat4, NodeGraph, NodeTransform, SceneNode};
 pub use object::{
     BlendMode, Canvas, ClipRect, Effect, ImageSource, LengthUnit, LiveStreamHandle, ObjectKind,
     Sample, SceneObject, Shape, TextRun, Transform, VideoSource,

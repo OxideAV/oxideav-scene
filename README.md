@@ -242,6 +242,43 @@ renderers. Encoding and file-format I/O are still follow-ups.
   follow-up. The 2D `RasterRenderer` ignores the palette; like
   `Light` before it, the type is the landing place for 3D-scene
   importers / writers.
+- **`node` module — `Mat4` / `NodeTransform` / `SceneNode` /
+  `NodeGraph`** — the placement half of the 3D surface that `light`
+  (energy) and `material` (surface response) anticipate. Models the
+  glTF 2.0 core node transform as the canonical clean-room contract
+  (same treatment as the light / material modules). `Mat4` is a
+  column-major 4x4 (`elements[col * 4 + row]`, the glTF `matrix`
+  accessor layout) with `IDENTITY`, `from_translation` /
+  `from_scale` / `from_quaternion` (unit-quaternion `XYZW`,
+  normalised before use, degenerate → identity) / `from_columns`,
+  `get(row, col)` / `row` / `col` accessors, a `mul` matrix product
+  (`(A * B) * v == A * (B * v)`), and `transform_point` (implicit
+  `w = 1`, defensive perspective divide) / `transform_direction`
+  (implicit `w = 0`). `NodeTransform` is the two mutually-exclusive
+  glTF forms — `Trs { translation, rotation, scale }` (the
+  animatable form) and `Matrix(Mat4)` (a pre-baked column-major 4x4,
+  carried verbatim) — collapsing to a local matrix via
+  `local_matrix()`; the TRS form composes in the spec-mandated
+  `T * R * S` order (scale applied to the vertices first, then
+  rotation, then translation). `NodeTransform::IDENTITY` is glTF's
+  "no transform properties" node. `SceneNode` carries a `name`, a
+  `NodeTransform`, and the indices of its children; `NodeGraph` is
+  the flat index-addressed hierarchy (mirroring glTF's `nodes`
+  array + `node.children` index lists) with `push` / `push_root`,
+  `node(index)` (bounds-checked — `None` on a stale external index),
+  `global_matrix(index)` folding the parent chain per the spec rule
+  (a node's global matrix is `parent_global * local`; a root's
+  global matrix is its local matrix; `None` for an out-of-range or
+  orphan/unparented node), and a `visit(|idx, node, world_matrix|)`
+  depth-first traversal that accumulates each node's world transform
+  exactly once in paint order (cheaper than per-node
+  `global_matrix`). Self-referential children are guarded so a
+  malformed cycle can't hang the traversal. Coordinate system is
+  glTF's: right-handed, `+Y` up, `+Z` forward, meters, radians,
+  CCW-positive rotation. Surface-only this round, mirroring the
+  lights / materials bring-up — the 2D `RasterRenderer` ignores it;
+  the type is the typed landing place for 3D-scene readers / writers
+  and a single spec-exact composition rule every consumer shares.
 - No `oxideav-codec` or container integration yet — that comes after
   the render pipeline is real.
 
@@ -614,6 +651,7 @@ src/
 ├── paint.rs         — Paint + Gradient (multi-stop linear / radial)
 ├── light.rs         — Light / LightInstance (3D punctual lights)
 ├── material.rs      — Material / PbrMetallicRoughness / AlphaMode (3D PBR palette)
+├── node.rs          — Mat4 / NodeTransform / SceneNode / NodeGraph (3D node transform graph)
 └── svg_path.rs      — SVG 1.1 path-data string → oxideav_core::Path
 ```
 

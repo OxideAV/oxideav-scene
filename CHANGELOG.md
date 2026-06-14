@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `node` module — typed 3D node local transform + flat node graph, the
+  placement half of the 3D surface that `light` (energy) and
+  `material` (surface response) anticipate. Models the glTF 2.0 core
+  node transform as the canonical clean-room contract (same treatment
+  as the light / material modules). Types: `Mat4` (column-major 4x4,
+  `elements[col * 4 + row]` matching the glTF `matrix` accessor
+  layout, with `IDENTITY`, `from_translation` / `from_scale` /
+  `from_quaternion` / `from_columns`, `get` / `row` / `col`, `mul`
+  matrix product, and `transform_point` / `transform_direction`);
+  `NodeTransform` (an enum of the two mutually-exclusive glTF forms —
+  `Trs { translation, rotation: unit-quaternion XYZW, scale }` and
+  `Matrix(Mat4)` — collapsing to a local matrix via `local_matrix()`,
+  composing TRS in the spec-mandated `T * R * S` order: scale first,
+  then rotation, then translation); `SceneNode` (name + transform +
+  child indices); and `NodeGraph` (a flat index-addressed hierarchy
+  with `push` / `push_root`, `node(index)` bounds-checked lookup,
+  `global_matrix(index)` folding the parent chain per the spec rule
+  `parent_global * local` — `None` for out-of-range / orphan nodes —
+  and a `visit` traversal that accumulates each node's world matrix
+  once in paint order). Quaternions are normalised before use
+  (degenerate falls back to identity) and self-referential children
+  are guarded so a malformed cycle can't hang traversal. Surface-only
+  this round, mirroring the lights / materials bring-up: no renderer
+  consumes node transforms yet — the type is the typed landing place
+  for 3D-scene readers / writers plus a single spec-exact composition
+  rule every consumer shares. Re-exported at the crate root as
+  `Mat4` / `NodeTransform` / `SceneNode` / `NodeGraph`.
 - `material` module — typed PBR material surface, the companion to
   the `light` module: where lights describe the energy arriving at a
   surface, a `Material` describes how the surface responds. The model
