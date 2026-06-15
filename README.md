@@ -26,259 +26,93 @@ Zero C dependencies — pure Rust, same rules as the rest of oxideav.
 ## Status
 
 **Type model complete; vector renderer landed.** This crate ships the
-type model + public-API shape for all three use cases, plus two concrete
-renderers. Encoding and file-format I/O are still follow-ups.
+type model + public-API shape for all three use cases, plus a concrete
+raster renderer. Encoding and file-format I/O are still follow-ups.
 
 - `Scene`, `SceneObject`, `ObjectKind`, `Transform`, `Animation`,
   `Keyframe`, `Easing`, `AudioCue` types are in place.
-- `RasterRenderer` is a concrete `SceneRenderer`: it walks
+- **`RasterRenderer`** is a concrete `SceneRenderer`: it walks
   `Scene::sampled_at(t)` in paint order and composites the **vector
-  slice** of a scene — backgrounds (solid / transparent / linear +
-  radial gradient, plus **`Background::DecodedImage(Arc<VideoFrame>)`**
-  — a pre-decoded straight-alpha RGBA8 backdrop wrapped in a
-  `Node::Image` spanning the full canvas, stretched edge-to-edge by
-  the downstream raster sampler), `Shape` objects (rect with corner
-  radius, polygon, **SVG-`path`-data**), `ObjectKind::Vector` frames,
-  **`ObjectKind::Group`** containers (children resolved by id and
-  inlined under the group's transform / opacity / clip; cycles
-  terminated; missing ids dropped), and
-  **`ObjectKind::Image(ImageSource::Decoded)`** — the carried
-  `oxideav_core::VideoFrame` is wrapped in a `Node::Image` whose
-  bounds rectangle spans the frame's natural `(width, height)`
-  decoded under the canonical RGBA8-stride convention
-  (`width = stride / 4`, `height = data.len() / stride`), so a
-  pre-decoded bitmap composites in the same pass as the rest of
-  the vector slice under the object's animation-merged transform /
-  opacity / clip. The downstream `oxideav_raster::Renderer`
-  samples through its configured `ImageFilter` (bilinear by
-  default). The result is an RGBA8 `VideoFrame`. `ObjectKind::Video`
-  now lowers the new `VideoSource::DecodedFrames { frames,
-  frame_duration }` variant symmetrically — at scene time `t` the
-  renderer picks
-  `frames[((t - lifetime.start) / frame_duration).clamp(0, len-1)]`
-  (so a finished clip freezes on its final frame instead of
-  flashing black) and wraps the chosen frame in the same
-  `Node::Image` shape `Image(Decoded)` uses, so a fixed-resolution
-  sequence composites under each object's animation-merged
-  `Transform` / opacity / clip in the same paint pass as
-  backgrounds, shapes, vector frames, images, and groups. A
-  `frame_duration <= 0` falls back to frame 0 instead of dividing
-  by zero. Decoder-bound `ImageSource::Path` /
-  `ImageSource::EncodedBytes`, `VideoSource::Path` /
-  `VideoSource::EncodedBytes`, and the path-based
-  `Background::Image(_)` continue to skip silently — pre-decode
-  upstream and feed back via the respective `Decoded(_)` /
-  `DecodedFrames { .. }` / `DecodedImage(_)` variants for now.
-  `ObjectKind::Live` / `ObjectKind::Text` are skipped pending a
-  font-registry / live-source-aware renderer. `Canvas::Vector`
-  scenes are rejected with `Error::Unsupported` (they export their
+  slice** of a scene to an RGBA8 `VideoFrame`. It handles:
+  - backgrounds — solid / transparent / linear + radial gradient, plus
+    `Background::DecodedImage(Arc<VideoFrame>)` (a pre-decoded RGBA8
+    backdrop stretched edge-to-edge);
+  - `Shape` objects — rect with corner radius, polygon, SVG path data;
+  - `ObjectKind::Vector` frames;
+  - `ObjectKind::Group` containers — children resolved by id and
+    inlined under the group's transform / opacity / clip; cycles
+    terminated, missing ids dropped;
+  - `ObjectKind::Image(ImageSource::Decoded)` — the carried
+    `VideoFrame` wrapped in a `Node::Image` spanning its natural size
+    (RGBA8-stride convention `width = stride / 4`,
+    `height = data.len() / stride`), sampled through the downstream
+    `oxideav_raster::Renderer`'s configured `ImageFilter`;
+  - `ObjectKind::Video(VideoSource::DecodedFrames { frames,
+    frame_duration })` — at scene time `t` the renderer picks the
+    in-range frame (finished clips freeze on their final frame;
+    `frame_duration <= 0` falls back to frame 0).
+
+  Decoder-bound `Path` / `EncodedBytes` image/video/background variants
+  skip silently — pre-decode upstream and feed back via the `Decoded`
+  variants. `ObjectKind::Live` / `ObjectKind::Text` are skipped pending
+  a font-registry / live-source-aware renderer. `Canvas::Vector` scenes
+  are rejected with `Error::Unsupported` (they export their
   `VectorFrame` directly without rasterisation).
-- `ImageSource::natural_size()` (and via it
-  `ObjectKind::Image(_).content_size()`) report the carried frame's
-  natural pixel dimensions for `ImageSource::Decoded` under the same
-  RGBA8-stride convention the renderer reads. Encoded variants still
-  return `None` — extracting their natural dimensions would require
-  a decoder the scene crate doesn't bind.
-- `VideoSource::natural_size()` / `VideoSource::frame_at(t,
-  lifetime_start)` (and via the former
-  `ObjectKind::Video(_).content_size()`) decode the carried first
-  frame's pixel dimensions for `VideoSource::DecodedFrames` under the
-  same RGBA8-stride convention, and resolve the visible frame at a
-  given scene time inside the carrying object's lifetime. Decoder-
-  bound variants return `None` for both, mirroring the `ImageSource`
-  shape.
-- `svg_path::parse_path` / `parse_svg_path` (re-exported at the crate
-  root) lowers an SVG 1.1 path-data string into an
-  `oxideav_core::Path`. The supported commands cover the entire SVG
-  1.1 path-data grammar: `M / m`, `L / l`, `H / h`, `V / v`,
-  `C / c`, `S / s`, `Q / q`, `T / t`, `A / a`, `Z / z`. Elliptical
-  arcs lower into `PathCommand::ArcTo` — `x_axis_rot` is normalised
-  from SVG degrees to radians, flags map to `large_arc` / `sweep`
-  booleans, and the SVG 1.1 F.6.2 out-of-range rules (negative radii
-  taken absolute, zero radius → line-to, coincident endpoints →
-  omitted segment) are applied at parse time. The downstream
-  `oxideav-raster` pipeline flattens the arc IR variant into cubics
-  via `flatten_arc_to_cubics`, so path data round-trips parser →
-  pixels without a scene-layer flattening pass. The parser feeds
-  `Shape::Path` rendering and `Shape::content_size` bbox queries.
-- `RasterRenderer::render_at(scene, t)` now also mixes the scene's
-  `AudioCue`s into the `RenderedFrame::audio` slot. The renderer
-  tracks an internal `audio_cursor` (next-sample scene tick); each
-  `render_at(scene, t)` emits a mono `Vec<f32>` covering
-  `[audio_cursor, t)` at `scene.sample_rate`, then advances the
-  cursor to `t`. `prepare(scene)` resets the cursor to `0`; `seek(t)`
-  snaps it to `t`; a rewind render (without a prior `seek`) returns
-  an empty audio slice and leaves the cursor where it was. Supported
-  sources: `Generator::Silence` / `Generator::SineWave` /
-  `Generator::WhiteNoise` (xorshift seeded from the scene-sample
-  index since trigger, so the noise is chunk-independent), `PcmS16`
-  (`/ 32768.0`), and `PcmF32`. Stereo / multichannel PCM downmixes
-  by averaging across channels; source sample rates that differ from
-  the scene's resample by nearest-neighbour. The summed mix is
-  multiplied by each cue's `volume` `Animation` (empty-keyframes-list
-  → unity gain) and clipped to `[-1.0, 1.0]`. The free function
-  `mix_cues(scene, start, end)` exposes the same mixer for callers
-  that want the audio path without invoking the visual renderer.
-  Decoder-bound `AudioSource::Path` / `AudioSource::EncodedBytes`
-  continue to skip silently — pre-decode upstream and feed back via
-  a PCM variant for now.
-- `SceneRenderer` + `SceneSampler` traits are defined; `StubRenderer`
-  remains as the always-`Error::Unsupported` placeholder.
-- `Paint` + `Gradient` typed paint patterns (multi-stop linear /
-  radial) land in [`paint`], with `Background::Gradient(_)` exposing
-  them as a richer alternative to the legacy two-colour
-  `Background::LinearGradient { from, to, angle_deg }`.
-- `Scene::apply(op)` / `Scene::apply_batch(ops)` drive the
-  [`Operation`] DSL in-process: add/remove objects, set transforms,
-  animate / cancel, fire audio cues. Receipts go to the caller for
-  logging.
-- `Scene::merge(other, time_offset, z_offset)` splices an entire
-  other scene onto this one — appends + shifts lifetimes and
-  keyframe times, offsets z-order, extends `SceneDuration::Finite` if
-  needed. NLE-style "compose track then append" lands cleanly.
-- `Scene::next_object_id()` allocates a collision-free
-  monotonically-increasing object id; pair with
-  `Operation::AddObject` to keep the streaming-compositor wire
-  format short.
-- `Light` / `LightCommon` / `SpotParams` typed punctual-light
-  primitive in the `light` module — a first 3D-adjacent surface,
-  parameterised per the glTF 2.0 ratified extension for punctual
-  lights. Three variants — `Directional` / `Point` / `Spot` — share
-  `name` / linear-RGB `color` / `intensity` / optional `range`
-  distance cutoff; `Spot` adds `inner_cone_angle` / `outer_cone_angle`
-  (radians, defaults `0.0` / `PI/4`). Helpers: `is_directional` /
-  `is_point` / `is_spot`, `has_position`, `has_direction`,
-  `honours_range`, `spot_params()`, and
-  `distance_attenuation(distance)` implementing the recommended
-  `max(min(1 − (d/range)^4, 1), 0) / d²` rule (falls back to `1/d²`
-  with no range, returns `1.0` for the directional variant, clamps
-  NaN / non-positive distances to `1.0`). `SpotParams::is_valid`
-  enforces `0 ≤ inner < outer ≤ π/2`. Renderer-side integration is a
-  follow-up — the type is exposed so 3D-scene importers have a typed
-  landing place.
-- **`LightInstance` + `Scene::lights`** — typed pose-carrying wrapper
-  around `Light` plus a top-level list on `Scene`, so 3D-scene
-  importers / writers can round-trip a scene's lights without a full
-  3D node graph. `LightInstance` carries `light: Light`,
-  `position: [f32; 3]`, and `direction: [f32; 3]` (the world-space
-  emission direction; default `[0, 0, -1]` matches the untransformed
-  local emission axis the punctual-light contract documents).
-  Builders: `LightInstance::new(light)` constructs at the origin
-  emitting along `-z`; `with_position` / `with_direction` override
-  either pose component. `position_is_meaningful()` /
-  `direction_is_meaningful()` route through `Light::has_position` /
-  `has_direction` so callers can branch by variant;
-  `normalized_direction()` returns the unit-length direction (or
-  `None` when the stored vector is degenerate or the variant ignores
-  direction — `Point` lights are omnidirectional, so any stored
-  direction reads as `None`). `vector_to(world_point)` returns
-  `(distance, unit_direction)` from the light position to a world
-  point — `None` for the directional variant (the light is at
-  infinity) and for coincident / non-finite geometry, so renderers
-  don't have to special-case the div-by-zero / NaN paths.
-  `cone_attenuation(world_point)` returns the spot cone's angular
-  falloff per the punctual-light cosine-interpolation formula
-  (`scale = 1 / max(1e-3, cos(inner) - cos(outer))`,
-  `angular = saturate(cd * scale + offset)`, squared), returning
-  `Some(1.0)` for directional + point lights so consumers can fold
-  it into a `(distance × cone)` product uniformly across variants.
-  `irradiance_at(world_point)` folds the whole composition into one
-  per-channel linear-RGB triple a renderer multiplies against a
-  surface's reflectance:
-  `L_c = color[c] × intensity × distance_attenuation × cone_attenuation`.
-  Directional lights return `Some(color × intensity)` at every point
-  (un-attenuated parallel rays); point / spot lights scale that base
-  by the inverse-square distance window (a point beyond `range` yields
-  the zero triple) and, for spots, the cone falloff. Returns `None`
-  for geometry too degenerate to shade (non-finite query, or a point
-  coincident with a positional light), and is deliberately unclamped
-  (physical inverse-square × intensity can exceed unity — tone-mapping
-  is the consumer's job).
-  `Scene::lights: Vec<LightInstance>` is default-empty; helpers
-  `push_light` / `has_lights` / `lights_filter(predicate)` cover
-  the common access patterns.
-  `Scene::merge` concatenates the other scene's lights verbatim
-  (no timeline component yet). The 2D `RasterRenderer` ignores this
-  list — light contribution to raster composition is follow-up
-  work; for now the field is the typed landing place for
-  glTF / USD / OBJ readers.
-- **`Material` + `Scene::materials`** — typed PBR material surface in
-  the `material` module, the companion to the punctual lights: where
-  a light describes the energy arriving at a surface
-  (`LightInstance::irradiance_at`), a `Material` describes how the
-  surface responds. Metallic-roughness model per the glTF 2.0 core
-  specification, defaults tracking the spec exactly:
-  `PbrMetallicRoughness` carries the linear-RGBA `base_color_factor`
-  (default white), `metallic_factor` / `roughness_factor` (default
-  `1.0` each), and optional base-color / packed metallic-roughness
-  texture slots; `Material` wraps it with `emissive_factor`
-  (default zero) + emissive / tangent-space normal / occlusion
-  texture slots, an `AlphaMode` (`Opaque` default, `Mask { cutoff }`
-  binary at the inclusive cutoff, `Blend` clamped — resolved by
-  `coverage(alpha)`), and `double_sided`. Texture slots are opaque
-  `TextureBinding`s (index into a caller-managed texture table +
-  `TEXCOORD` set, plus per-slot normal `scale` / occlusion
-  `strength`) — the scene crate never owns texture pixels. The
-  spec-defined derived BRDF inputs are methods so every consumer
-  derives them identically: `diffuse_color()`
-  (`base.rgb × (1 − metallic)`), `f0()`
-  (`lerp(0.04, base.rgb, metallic)`), `alpha_roughness()`
-  (`roughness²`), `fresnel(v_dot_h)` (per-channel Schlick).
-  `is_valid()` range-checks every factor; `is_emissive()` /
-  `is_textured()` / `base_coverage()` cover the common consumer
-  branches. `Scene::materials: Vec<Material>` is the default-empty
-  palette. Construction + access helpers: `push_material` (append,
-  returns the new index) / `has_materials` / `material_count` (the
-  exclusive index bound) / `material(index)` + `material_mut(index)`
-  (bounds-checked indexed lookup — `None` for an out-of-range index,
-  so a stale index from an external file can't panic) /
-  `materials_filter(predicate)` (mirrors `lights_filter`, yielding
-  `(index, &Material)` so callers can select e.g. every emissive
-  material and resolve it back through `material`). `Scene::merge`
-  concatenates the palettes verbatim, preserving the base scene's
-  indices (the merged entries append after, so a caller rebasing
-  external index references adds the base `material_count`); a mesh
-  object carrying a material index in the object model is still a
-  follow-up. The 2D `RasterRenderer` ignores the palette; like
-  `Light` before it, the type is the landing place for 3D-scene
-  importers / writers.
-- **`node` module — `Mat4` / `NodeTransform` / `SceneNode` /
-  `NodeGraph`** — the placement half of the 3D surface that `light`
-  (energy) and `material` (surface response) anticipate. Models the
-  glTF 2.0 core node transform as the canonical clean-room contract
-  (same treatment as the light / material modules). `Mat4` is a
-  column-major 4x4 (`elements[col * 4 + row]`, the glTF `matrix`
-  accessor layout) with `IDENTITY`, `from_translation` /
-  `from_scale` / `from_quaternion` (unit-quaternion `XYZW`,
-  normalised before use, degenerate → identity) / `from_columns`,
-  `get(row, col)` / `row` / `col` accessors, a `mul` matrix product
-  (`(A * B) * v == A * (B * v)`), and `transform_point` (implicit
-  `w = 1`, defensive perspective divide) / `transform_direction`
-  (implicit `w = 0`). `NodeTransform` is the two mutually-exclusive
-  glTF forms — `Trs { translation, rotation, scale }` (the
-  animatable form) and `Matrix(Mat4)` (a pre-baked column-major 4x4,
-  carried verbatim) — collapsing to a local matrix via
-  `local_matrix()`; the TRS form composes in the spec-mandated
-  `T * R * S` order (scale applied to the vertices first, then
-  rotation, then translation). `NodeTransform::IDENTITY` is glTF's
-  "no transform properties" node. `SceneNode` carries a `name`, a
-  `NodeTransform`, and the indices of its children; `NodeGraph` is
-  the flat index-addressed hierarchy (mirroring glTF's `nodes`
-  array + `node.children` index lists) with `push` / `push_root`,
-  `node(index)` (bounds-checked — `None` on a stale external index),
-  `global_matrix(index)` folding the parent chain per the spec rule
-  (a node's global matrix is `parent_global * local`; a root's
-  global matrix is its local matrix; `None` for an out-of-range or
-  orphan/unparented node), and a `visit(|idx, node, world_matrix|)`
-  depth-first traversal that accumulates each node's world transform
-  exactly once in paint order (cheaper than per-node
-  `global_matrix`). Self-referential children are guarded so a
-  malformed cycle can't hang the traversal. Coordinate system is
-  glTF's: right-handed, `+Y` up, `+Z` forward, meters, radians,
-  CCW-positive rotation. Surface-only this round, mirroring the
-  lights / materials bring-up — the 2D `RasterRenderer` ignores it;
-  the type is the typed landing place for 3D-scene readers / writers
-  and a single spec-exact composition rule every consumer shares.
+- **Geometry introspection** — `ImageSource::natural_size()` /
+  `VideoSource::natural_size()` / `frame_at(t, lifetime_start)` (and
+  the `content_size()` accessors that route through them) report
+  natural pixel dimensions and resolve the visible frame for the
+  `Decoded` variants; encoded variants return `None`.
+- **SVG path data** — `svg_path::parse_path` / `parse_svg_path`
+  (re-exported at the crate root) lowers an SVG 1.1 path-data string
+  into an `oxideav_core::Path`, covering the entire grammar
+  (`M / L / H / V / C / S / Q / T / A / Z`, both cases). Elliptical
+  arcs lower into `PathCommand::ArcTo` with the SVG 1.1 F.6.2
+  out-of-range rules applied at parse time; `oxideav-raster` flattens
+  them into cubics downstream. Feeds `Shape::Path` rendering and bbox
+  queries.
+- **Audio mixing** — `RasterRenderer::render_at(scene, t)` mixes the
+  scene's `AudioCue`s into the `RenderedFrame::audio` slot, tracking an
+  internal `audio_cursor` and emitting a mono `Vec<f32>` covering
+  `[audio_cursor, t)` at `scene.sample_rate`. Supported sources:
+  `Generator::Silence` / `SineWave` / `WhiteNoise` (chunk-independent
+  xorshift), `PcmS16`, and `PcmF32`. Stereo / multichannel PCM
+  downmixes by averaging; differing source rates resample by
+  nearest-neighbour; the summed mix is multiplied by each cue's
+  `volume` `Animation` and clipped to `[-1.0, 1.0]`. The free function
+  `mix_cues(scene, start, end)` exposes the same mixer standalone.
+  Decoder-bound `AudioSource` variants skip silently.
+- **Traits** — `SceneRenderer` + `SceneSampler` are defined;
+  `StubRenderer` remains the always-`Error::Unsupported` placeholder.
+- **Paint** — `Paint` + `Gradient` typed paint patterns (multi-stop
+  linear / radial) live in [`paint`], with `Background::Gradient(_)`
+  the richer alternative to the legacy two-colour
+  `Background::LinearGradient`.
+- **Operations DSL** — `Scene::apply(op)` / `apply_batch(ops)` drive
+  the [`Operation`] DSL in-process (add/remove objects, set transforms,
+  animate / cancel, fire audio cues), returning receipts to the caller.
+- **Compositing helpers** — `Scene::merge(other, time_offset,
+  z_offset)` splices another scene on (shifting lifetimes / keyframe
+  times, offsetting z-order, extending a finite duration);
+  `Scene::next_object_id()` allocates a collision-free monotonic id.
+- **3D-adjacent typed surfaces** (landing places for glTF / USD / OBJ
+  importers; the 2D `RasterRenderer` ignores them for now):
+  - `light` — `Light` / `LightCommon` / `SpotParams` punctual-light
+    primitive (Directional / Point / Spot) per the glTF 2.0 punctual
+    lights extension, with `distance_attenuation` / `cone_attenuation` /
+    `irradiance_at` helpers. `LightInstance` is the pose-carrying
+    wrapper; `Scene::lights` is the top-level list (`push_light` /
+    `has_lights` / `lights_filter`).
+  - `material` — `Material` / `PbrMetallicRoughness` / `AlphaMode`
+    metallic-roughness model per the glTF 2.0 core spec, with derived
+    BRDF inputs (`diffuse_color` / `f0` / `alpha_roughness` /
+    `fresnel`) as methods. `Scene::materials` is the palette
+    (`push_material` / `material` / `materials_filter`).
+  - `node` — `Mat4` / `NodeTransform` / `SceneNode` / `NodeGraph`
+    column-major node-transform graph per the glTF 2.0 core spec, with
+    `global_matrix` parent-chain folding and a cycle-guarded `visit`
+    depth-first traversal. Right-handed, `+Y` up, `+Z` forward.
+  `Scene::merge` concatenates lights and materials verbatim.
 - No `oxideav-codec` or container integration yet — that comes after
   the render pipeline is real.
 
@@ -585,8 +419,7 @@ Both paths delegate to [`oxideav-pixfmt`](https://crates.io/crates/oxideav-pixfm
 - `Text` samplers shape glyphs via a pluggable `TextShaper` trait
   (default: a minimal monospace fallback; real layout engines land as
   separate crates).
-- `Shape` samplers rasterise on demand via a pure-Rust vector
-  rasteriser (planned as `oxideav-rasterise`, another follow-up).
+- `Shape` samplers rasterise on demand via `oxideav-raster`.
 
 ## Use cases in detail
 
@@ -629,7 +462,7 @@ animations that overlap two `Video` objects. Effects are the
 works by driving the `SceneSampler` at arbitrary timestamps; export
 renders the entire duration at the target framerate.
 
-## Crate layout (scaffold today)
+## Crate layout
 
 ```
 src/
@@ -660,10 +493,11 @@ variants can land without an SemVer break.
 
 ## Non-goals (for now)
 
-- **Not a vector rasteriser.** Shape rendering ships as a separate
-  crate (`oxideav-rasterise`) pending.
-- **Not a text shaper.** The `TextShaper` trait is pluggable; a real
-  shaper lands in `oxideav-text` (pending).
+- **Not a vector rasteriser.** Shape / path rasterisation is delegated
+  to [`oxideav-raster`](https://github.com/OxideAV/oxideav-raster).
+- **Not a text shaper.** The `TextShaper` trait is pluggable; text
+  layout is delegated to
+  [`oxideav-scribe`](https://github.com/OxideAV/oxideav-scribe).
 - **Not an NLE UI.** This crate is the data model + renderer core; the
   UI is downstream.
 - **Not a document parser.** PDF / SVG ingest land in `oxideav-pdf` /
