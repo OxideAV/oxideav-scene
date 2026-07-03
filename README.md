@@ -1,5 +1,7 @@
 # oxideav-scene
 
+[![CI](https://github.com/OxideAV/oxideav-scene/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-scene/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-scene.svg)](https://crates.io/crates/oxideav-scene) [![docs.rs](https://docs.rs/oxideav-scene/badge.svg)](https://docs.rs/oxideav-scene) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A **time-based composition model** for oxideav: a `Scene` is a canvas
 populated with `Object`s (images, videos, text, shapes, audio cues)
 animated over a timeline. Scenes are the foundation for three distinct
