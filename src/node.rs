@@ -319,6 +319,113 @@ impl Mat4 {
             self.elements[2] * d[0] + self.elements[6] * d[1] + self.elements[10] * d[2],
         ]
     }
+
+    /// Decompose an affine, shear-free matrix into
+    /// `(translation, rotation quaternion XYZW, scale)` — the inverse
+    /// of the `T * R * S` composition.
+    ///
+    /// The spec requires a node `matrix` to be decomposable to TRS
+    /// properties (transformation matrices cannot skew or shear), so
+    /// this returns `None` exactly when the input steps outside that
+    /// contract:
+    ///
+    /// - the bottom row is not `(0, 0, 0, 1)` (not affine);
+    /// - any component is non-finite;
+    /// - a basis column has (near-)zero length (a collapsed axis has
+    ///   no recoverable rotation);
+    /// - the scale-normalised basis is not orthogonal (shear).
+    ///
+    /// A mirrored basis (negative determinant) is decomposed by
+    /// negating the X scale. The returned quaternion is unit-length;
+    /// note `q` and `-q` encode the same rotation, so round-trip
+    /// comparisons should recompose to matrices rather than compare
+    /// raw components.
+    pub fn decompose_trs(&self) -> Option<([f32; 3], [f32; 4], [f32; 3])> {
+        if !self.elements.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        // Affine: bottom row must be (0, 0, 0, 1).
+        let eps = 1e-5;
+        let bottom = self.row(3);
+        if (bottom[0]).abs() > eps
+            || (bottom[1]).abs() > eps
+            || (bottom[2]).abs() > eps
+            || (bottom[3] - 1.0).abs() > eps
+        {
+            return None;
+        }
+
+        let translation = [self.elements[12], self.elements[13], self.elements[14]];
+
+        // Basis columns of the upper-left 3x3.
+        let mut cols = [
+            [self.elements[0], self.elements[1], self.elements[2]],
+            [self.elements[4], self.elements[5], self.elements[6]],
+            [self.elements[8], self.elements[9], self.elements[10]],
+        ];
+        let mut scale = [0.0f32; 3];
+        for (axis, col) in cols.iter().enumerate() {
+            let len = (col[0] * col[0] + col[1] * col[1] + col[2] * col[2]).sqrt();
+            scale[axis] = len;
+        }
+        if scale.iter().any(|&s| s <= f32::EPSILON) {
+            return None; // collapsed axis: rotation unrecoverable
+        }
+
+        // Mirrored basis: fold the reflection into a negative X scale.
+        let det3 = {
+            let [c0, c1, c2] = cols;
+            c0[0] * (c1[1] * c2[2] - c1[2] * c2[1]) - c1[0] * (c0[1] * c2[2] - c0[2] * c2[1])
+                + c2[0] * (c0[1] * c1[2] - c0[2] * c1[1])
+        };
+        if det3 < 0.0 {
+            scale[0] = -scale[0];
+        }
+
+        // Normalise columns into a candidate rotation basis.
+        for (axis, col) in cols.iter_mut().enumerate() {
+            let inv = 1.0 / scale[axis];
+            col[0] *= inv;
+            col[1] *= inv;
+            col[2] *= inv;
+        }
+
+        // Shear check: the basis must be orthogonal.
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let ortho_eps = 1e-4;
+        if dot(cols[0], cols[1]).abs() > ortho_eps
+            || dot(cols[0], cols[2]).abs() > ortho_eps
+            || dot(cols[1], cols[2]).abs() > ortho_eps
+        {
+            return None;
+        }
+
+        // Quaternion from the orthonormal rotation basis, branching on
+        // the largest of (trace, m00, m11, m22) for numeric stability.
+        let (m00, m11, m22) = (cols[0][0], cols[1][1], cols[2][2]);
+        let (m01, m02) = (cols[1][0], cols[2][0]); // m[row][col]
+        let (m10, m12) = (cols[0][1], cols[2][1]);
+        let (m20, m21) = (cols[0][2], cols[1][2]);
+        let trace = m00 + m11 + m22;
+        let q = if trace > 0.0 {
+            let s = (trace + 1.0).sqrt() * 2.0; // 4w
+            [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s]
+        } else if m00 >= m11 && m00 >= m22 {
+            let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0; // 4x
+            [0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s]
+        } else if m11 >= m22 {
+            let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0; // 4y
+            [(m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s]
+        } else {
+            let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0; // 4z
+            [(m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s]
+        };
+        // Normalise to absorb accumulated rounding.
+        let qlen = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+        let rotation = [q[0] / qlen, q[1] / qlen, q[2] / qlen, q[3] / qlen];
+
+        Some((translation, rotation, scale))
+    }
 }
 
 /// A node's local-space transform, in either of glTF's two forms.
@@ -420,6 +527,27 @@ impl NodeTransform {
                 t.mul(&r).mul(&s)
             }
             NodeTransform::Matrix(m) => *m,
+        }
+    }
+
+    /// This transform as TRS properties — the animatable form.
+    ///
+    /// [`NodeTransform::Trs`] is returned as-is;
+    /// [`NodeTransform::Matrix`] is decomposed via
+    /// [`Mat4::decompose_trs`], returning `None` when the matrix
+    /// steps outside the spec's decomposability contract (shear,
+    /// collapsed axis, non-affine, non-finite).
+    pub fn to_trs(&self) -> Option<NodeTransform> {
+        match self {
+            NodeTransform::Trs { .. } => Some(*self),
+            NodeTransform::Matrix(m) => {
+                let (translation, rotation, scale) = m.decompose_trs()?;
+                Some(NodeTransform::Trs {
+                    translation,
+                    rotation,
+                    scale,
+                })
+            }
         }
     }
 }
@@ -1236,6 +1364,128 @@ mod tests {
         assert!(m.inverse().is_none());
         // Identity inverts to itself.
         assert_eq!(Mat4::IDENTITY.inverse(), Some(Mat4::IDENTITY));
+    }
+
+    /// Assert two matrices agree element-wise within tolerance.
+    fn assert_mat_approx(a: &Mat4, b: &Mat4) {
+        for i in 0..16 {
+            assert!(
+                (a.elements[i] - b.elements[i]).abs() < 1e-4,
+                "element {i}: {} vs {}",
+                a.elements[i],
+                b.elements[i]
+            );
+        }
+    }
+
+    #[test]
+    fn decompose_round_trips_trs_matrices() {
+        // A spread of rotations (per-axis + arbitrary), non-uniform
+        // scales, translations. q and -q are the same rotation, so
+        // compare via recomposition.
+        let half = FRAC_PI_4; // 90° rotations
+        let third = std::f32::consts::FRAC_PI_6; // 60° rotations
+        let cases: Vec<([f32; 3], [f32; 4], [f32; 3])> = vec![
+            ([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]),
+            (
+                [1.0, 2.0, 3.0],
+                [half.sin(), 0.0, 0.0, half.cos()],
+                [2.0; 3],
+            ),
+            (
+                [-5.0, 0.5, 9.0],
+                [0.0, third.sin(), 0.0, third.cos()],
+                [2.0, 3.0, 0.25],
+            ),
+            (
+                [0.0, -1.0, 4.0],
+                [0.0, 0.0, third.sin(), third.cos()],
+                [1.0, 5.0, 1.0],
+            ),
+            // Arbitrary-axis rotation (normalised inside from_quaternion).
+            ([7.0, 7.0, 7.0], [0.5, 0.5, 0.5, 0.5], [0.5, 2.5, 4.0]),
+        ];
+        for (t, q, s) in cases {
+            let m = NodeTransform::Trs {
+                translation: t,
+                rotation: q,
+                scale: s,
+            }
+            .local_matrix();
+            let (dt, dq, ds) = m.decompose_trs().unwrap();
+            assert!(approx3(dt, t), "{dt:?} vs {t:?}");
+            assert!(approx3(ds, s), "{ds:?} vs {s:?}");
+            let recomposed = NodeTransform::Trs {
+                translation: dt,
+                rotation: dq,
+                scale: ds,
+            }
+            .local_matrix();
+            assert_mat_approx(&recomposed, &m);
+            // Returned quaternion is unit-length.
+            let qlen: f32 = dq.iter().map(|v| v * v).sum::<f32>().sqrt();
+            assert!(approx(qlen, 1.0));
+        }
+    }
+
+    #[test]
+    fn decompose_handles_mirrored_basis() {
+        // Negative-determinant matrix: reflection folded into scale.x.
+        let m = Mat4::from_scale([-2.0, 3.0, 4.0]);
+        let (t, q, s) = m.decompose_trs().unwrap();
+        assert!(approx3(t, [0.0; 3]));
+        assert!(s[0] < 0.0, "{s:?}");
+        let recomposed = NodeTransform::Trs {
+            translation: t,
+            rotation: q,
+            scale: s,
+        }
+        .local_matrix();
+        assert_mat_approx(&recomposed, &m);
+    }
+
+    #[test]
+    fn decompose_rejects_out_of_contract_matrices() {
+        // Shear: column 1 leans into column 0.
+        let mut sheared = Mat4::IDENTITY;
+        sheared.elements[4] = 0.5; // m[0][1]
+        assert!(sheared.decompose_trs().is_none());
+
+        // Collapsed axis (zero scale).
+        assert!(Mat4::from_scale([1.0, 0.0, 1.0]).decompose_trs().is_none());
+
+        // Non-affine bottom row (projection-like).
+        let mut proj = Mat4::IDENTITY;
+        proj.elements[11] = -1.0; // m[3][2]
+        assert!(proj.decompose_trs().is_none());
+
+        // Non-finite.
+        let mut nan = Mat4::IDENTITY;
+        nan.elements[5] = f32::NAN;
+        assert!(nan.decompose_trs().is_none());
+    }
+
+    #[test]
+    fn to_trs_converts_matrix_form() {
+        // TRS form: returned verbatim.
+        let trs = NodeTransform::from_translation([1.0, 2.0, 3.0]);
+        assert_eq!(trs.to_trs(), Some(trs));
+
+        // Matrix form: decomposed to an equivalent TRS.
+        let baked = NodeTransform::Trs {
+            translation: [3.0, -1.0, 2.0],
+            rotation: [0.0, FRAC_PI_4.sin(), 0.0, FRAC_PI_4.cos()],
+            scale: [2.0, 2.0, 2.0],
+        };
+        let m = NodeTransform::Matrix(baked.local_matrix());
+        let converted = m.to_trs().unwrap();
+        assert!(converted.is_trs());
+        assert_mat_approx(&converted.local_matrix(), &baked.local_matrix());
+
+        // Sheared matrix: not convertible.
+        let mut sheared = Mat4::IDENTITY;
+        sheared.elements[4] = 0.5;
+        assert_eq!(NodeTransform::Matrix(sheared).to_trs(), None);
     }
 
     /// A 4-node fixture: root -> (a -> leaf, b), plus an orphan.

@@ -33,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matrix), and `inverse()` (adjugate over determinant, `None` for
   singular — e.g. zero-scale — or non-finite matrices), enabling
   world-to-local mapping and picking on top of the node graph.
+- `node::Mat4::decompose_trs()` + `node::NodeTransform::to_trs()` —
+  the inverse of the `T * R * S` composition. Recovers
+  `(translation, unit rotation quaternion XYZW, scale)` from an
+  affine shear-free matrix (the spec requires a node `matrix` to be
+  decomposable to TRS; transformation matrices cannot skew or shear),
+  branching on the largest of trace / diagonal entries for a
+  numerically stable quaternion. Mirrored (negative-determinant)
+  bases fold the reflection into a negative X scale. Returns `None`
+  exactly when the input steps outside the contract: non-affine
+  bottom row, non-finite components, a collapsed (zero-length) basis
+  column, or a non-orthogonal (sheared) basis. `to_trs()` converts
+  the `Matrix` form into the animatable `Trs` form (animation
+  channels may only target TRS nodes).
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core
