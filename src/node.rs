@@ -386,12 +386,127 @@ impl SceneNode {
     }
 }
 
+/// A structural or numeric defect found by [`NodeGraph::validate`].
+///
+/// Every variant carries the index (or indices) involved so a caller
+/// can point at the offending node in an imported file. The spec's
+/// hierarchy contract is "a set of disjoint strict trees": each node
+/// has at most one parent, no node is its own ancestor, and roots are
+/// exactly the parentless nodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NodeGraphError {
+    /// `roots` lists an index past the end of `nodes`.
+    RootOutOfRange {
+        /// The offending root index.
+        root: usize,
+        /// Number of nodes in the graph.
+        len: usize,
+    },
+    /// The same index appears in `roots` more than once.
+    DuplicateRoot {
+        /// The repeated root index.
+        root: usize,
+    },
+    /// A node's `children` lists an index past the end of `nodes`.
+    ChildOutOfRange {
+        /// The node whose child list is broken.
+        node: usize,
+        /// The out-of-range child index it lists.
+        child: usize,
+        /// Number of nodes in the graph.
+        len: usize,
+    },
+    /// A node is claimed as a child by two parents (or twice by the
+    /// same parent) — the hierarchy must be a strict tree.
+    MultipleParents {
+        /// The doubly-claimed child.
+        child: usize,
+        /// The parent that claimed it first.
+        first_parent: usize,
+        /// The parent that claimed it again.
+        second_parent: usize,
+    },
+    /// An index listed in `roots` is also some node's child — roots
+    /// are by definition parentless.
+    RootHasParent {
+        /// The offending root index.
+        root: usize,
+        /// The node claiming it as a child.
+        parent: usize,
+    },
+    /// A node is its own ancestor (the parent chain loops).
+    Cycle {
+        /// A node on the loop.
+        node: usize,
+    },
+    /// A node's transform carries a NaN or infinite component.
+    NonFiniteTransform {
+        /// The offending node.
+        node: usize,
+    },
+    /// A node's TRS rotation quaternion has (near-)zero length, so it
+    /// cannot be normalised into the unit quaternion the spec
+    /// requires.
+    ZeroRotation {
+        /// The offending node.
+        node: usize,
+    },
+}
+
+impl std::fmt::Display for NodeGraphError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeGraphError::RootOutOfRange { root, len } => {
+                write!(f, "root index {root} out of range (graph has {len} nodes)")
+            }
+            NodeGraphError::DuplicateRoot { root } => {
+                write!(f, "root index {root} listed more than once")
+            }
+            NodeGraphError::ChildOutOfRange { node, child, len } => {
+                write!(
+                    f,
+                    "node {node} lists child {child} out of range (graph has {len} nodes)"
+                )
+            }
+            NodeGraphError::MultipleParents {
+                child,
+                first_parent,
+                second_parent,
+            } => {
+                write!(
+                    f,
+                    "node {child} claimed as child by both node {first_parent} and node {second_parent}"
+                )
+            }
+            NodeGraphError::RootHasParent { root, parent } => {
+                write!(f, "root {root} is also a child of node {parent}")
+            }
+            NodeGraphError::Cycle { node } => {
+                write!(f, "node {node} is its own ancestor (cycle)")
+            }
+            NodeGraphError::NonFiniteTransform { node } => {
+                write!(f, "node {node} transform has a NaN / infinite component")
+            }
+            NodeGraphError::ZeroRotation { node } => {
+                write!(
+                    f,
+                    "node {node} rotation quaternion has zero length (not normalisable)"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for NodeGraphError {}
+
 /// A flat, index-addressed 3D node hierarchy.
 ///
 /// Nodes live in `nodes`; `roots` lists the indices of nodes with no
 /// parent (glTF `scene.nodes`). The hierarchy MUST be a set of disjoint
 /// strict trees — no cycles, each node at most one parent — and the
 /// traversal helpers below assume that invariant.
+/// [`NodeGraph::validate`] checks it for untrusted input.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NodeGraph {
     /// All nodes, flat. Children reference each other by index.
@@ -436,6 +551,157 @@ impl NodeGraph {
     /// index from an external file can't panic.
     pub fn node(&self, index: usize) -> Option<&SceneNode> {
         self.nodes.get(index)
+    }
+
+    /// The parent of every node, computed by scanning each node's
+    /// `children` list: `result[i]` is `Some(p)` when node `p` lists
+    /// `i` as a child, `None` for roots / orphans.
+    ///
+    /// When a node is claimed by several parents (invalid — see
+    /// [`NodeGraph::validate`]) the first claimant in iteration order
+    /// wins. O(total child references).
+    pub fn parent_indices(&self) -> Vec<Option<usize>> {
+        let mut parents = vec![None; self.nodes.len()];
+        for (i, node) in self.nodes.iter().enumerate() {
+            for &child in &node.children {
+                if let Some(slot) = parents.get_mut(child) {
+                    if slot.is_none() {
+                        *slot = Some(i);
+                    }
+                }
+            }
+        }
+        parents
+    }
+
+    /// The parent of the node at `index`, or `None` when the node is a
+    /// root / orphan or `index` is out of range.
+    ///
+    /// Convenience over a full [`NodeGraph::parent_indices`] scan —
+    /// callers resolving many nodes should compute the map once.
+    pub fn parent_index(&self, index: usize) -> Option<usize> {
+        if index >= self.nodes.len() {
+            return None;
+        }
+        self.parent_indices()[index]
+    }
+
+    /// Check the strict-tree hierarchy invariant plus per-node numeric
+    /// sanity, returning the first defect found.
+    ///
+    /// Verified, in order:
+    ///
+    /// 1. every index in `roots` is in range and listed once
+    ///    ([`NodeGraphError::RootOutOfRange`] /
+    ///    [`NodeGraphError::DuplicateRoot`]);
+    /// 2. every child index is in range
+    ///    ([`NodeGraphError::ChildOutOfRange`]);
+    /// 3. no node has two parents
+    ///    ([`NodeGraphError::MultipleParents`]);
+    /// 4. no root is also somebody's child
+    ///    ([`NodeGraphError::RootHasParent`]);
+    /// 5. no node is its own ancestor ([`NodeGraphError::Cycle`]);
+    /// 6. every transform component is finite
+    ///    ([`NodeGraphError::NonFiniteTransform`]) and every TRS
+    ///    rotation quaternion is normalisable
+    ///    ([`NodeGraphError::ZeroRotation`]).
+    ///
+    /// Orphan nodes (parentless but not listed as roots) are legal —
+    /// they simply have no world placement (see
+    /// [`NodeGraph::global_matrix`]).
+    pub fn validate(&self) -> Result<(), NodeGraphError> {
+        let len = self.nodes.len();
+
+        // 1. Roots in range, no duplicates.
+        let mut is_root = vec![false; len];
+        for &root in &self.roots {
+            if root >= len {
+                return Err(NodeGraphError::RootOutOfRange { root, len });
+            }
+            if is_root[root] {
+                return Err(NodeGraphError::DuplicateRoot { root });
+            }
+            is_root[root] = true;
+        }
+
+        // 2 + 3. Children in range; at most one parent each.
+        let mut parents: Vec<Option<usize>> = vec![None; len];
+        for (i, node) in self.nodes.iter().enumerate() {
+            for &child in &node.children {
+                if child >= len {
+                    return Err(NodeGraphError::ChildOutOfRange {
+                        node: i,
+                        child,
+                        len,
+                    });
+                }
+                match parents[child] {
+                    Some(first_parent) => {
+                        return Err(NodeGraphError::MultipleParents {
+                            child,
+                            first_parent,
+                            second_parent: i,
+                        });
+                    }
+                    None => parents[child] = Some(i),
+                }
+            }
+        }
+
+        // 4. Roots are parentless.
+        for (child, parent) in parents.iter().enumerate() {
+            if let Some(parent) = *parent {
+                if is_root[child] {
+                    return Err(NodeGraphError::RootHasParent {
+                        root: child,
+                        parent,
+                    });
+                }
+            }
+        }
+
+        // 5. Parent chains terminate. With at-most-one-parent already
+        // established, a chain longer than `len` steps must loop.
+        for start in 0..len {
+            let mut current = start;
+            let mut steps = 0usize;
+            while let Some(parent) = parents[current] {
+                steps += 1;
+                if steps > len {
+                    return Err(NodeGraphError::Cycle { node: start });
+                }
+                current = parent;
+            }
+        }
+
+        // 6. Numeric sanity per node.
+        for (i, node) in self.nodes.iter().enumerate() {
+            match &node.transform {
+                NodeTransform::Trs {
+                    translation,
+                    rotation,
+                    scale,
+                } => {
+                    let finite = translation.iter().all(|v| v.is_finite())
+                        && rotation.iter().all(|v| v.is_finite())
+                        && scale.iter().all(|v| v.is_finite());
+                    if !finite {
+                        return Err(NodeGraphError::NonFiniteTransform { node: i });
+                    }
+                    let len_sq: f32 = rotation.iter().map(|v| v * v).sum();
+                    if len_sq.sqrt() <= f32::EPSILON {
+                        return Err(NodeGraphError::ZeroRotation { node: i });
+                    }
+                }
+                NodeTransform::Matrix(m) => {
+                    if !m.elements.iter().all(|v| v.is_finite()) {
+                        return Err(NodeGraphError::NonFiniteTransform { node: i });
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// The global (world-space) matrix of the node at `index`: the
@@ -750,6 +1016,193 @@ mod tests {
         assert!(approx3(seen[0].1, [10.0, 0.0, 0.0]));
         assert_eq!(seen[1].0, c);
         assert!(approx3(seen[1].1, [15.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_graph() {
+        let mut g = NodeGraph::new();
+        let c = g.push(SceneNode::named("c"));
+        let r = g.push_root(SceneNode {
+            name: "r".into(),
+            transform: NodeTransform::from_translation([1.0, 2.0, 3.0]),
+            children: vec![c],
+        });
+        // An orphan is legal (no world placement, but not a defect).
+        let _orphan = g.push(SceneNode::named("orphan"));
+        assert_eq!(g.validate(), Ok(()));
+        assert_eq!(g.parent_index(c), Some(r));
+        assert_eq!(g.parent_index(r), None);
+        // Empty graph is trivially valid.
+        assert_eq!(NodeGraph::new().validate(), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_bad_roots() {
+        let mut g = NodeGraph::new();
+        g.roots.push(3);
+        assert_eq!(
+            g.validate(),
+            Err(NodeGraphError::RootOutOfRange { root: 3, len: 0 })
+        );
+
+        let mut g = NodeGraph::new();
+        let r = g.push_root(SceneNode::named("r"));
+        g.roots.push(r);
+        assert_eq!(g.validate(), Err(NodeGraphError::DuplicateRoot { root: r }));
+    }
+
+    #[test]
+    fn validate_rejects_child_out_of_range() {
+        let mut g = NodeGraph::new();
+        let r = g.push_root(SceneNode::named("r"));
+        g.nodes[r].children.push(7);
+        assert_eq!(
+            g.validate(),
+            Err(NodeGraphError::ChildOutOfRange {
+                node: r,
+                child: 7,
+                len: 1
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_multiple_parents() {
+        let mut g = NodeGraph::new();
+        let c = g.push(SceneNode::named("c"));
+        let p1 = g.push_root(SceneNode {
+            name: "p1".into(),
+            transform: NodeTransform::IDENTITY,
+            children: vec![c],
+        });
+        let p2 = g.push_root(SceneNode {
+            name: "p2".into(),
+            transform: NodeTransform::IDENTITY,
+            children: vec![c],
+        });
+        assert_eq!(
+            g.validate(),
+            Err(NodeGraphError::MultipleParents {
+                child: c,
+                first_parent: p1,
+                second_parent: p2
+            })
+        );
+
+        // Same parent listing a child twice is the same defect.
+        let mut g = NodeGraph::new();
+        let c = g.push(SceneNode::named("c"));
+        let p = g.push_root(SceneNode {
+            name: "p".into(),
+            transform: NodeTransform::IDENTITY,
+            children: vec![c, c],
+        });
+        assert_eq!(
+            g.validate(),
+            Err(NodeGraphError::MultipleParents {
+                child: c,
+                first_parent: p,
+                second_parent: p
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_root_with_parent() {
+        let mut g = NodeGraph::new();
+        let a = g.push_root(SceneNode::named("a"));
+        let b = g.push_root(SceneNode::named("b"));
+        g.nodes[a].children.push(b);
+        assert_eq!(
+            g.validate(),
+            Err(NodeGraphError::RootHasParent { root: b, parent: a })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_cycles() {
+        // Self-loop.
+        let mut g = NodeGraph::new();
+        let a = g.push(SceneNode::named("a"));
+        g.nodes[a].children.push(a);
+        assert_eq!(g.validate(), Err(NodeGraphError::Cycle { node: a }));
+
+        // Two-node loop: a -> b -> a.
+        let mut g = NodeGraph::new();
+        let a = g.push(SceneNode::named("a"));
+        let b = g.push(SceneNode::named("b"));
+        g.nodes[a].children.push(b);
+        g.nodes[b].children.push(a);
+        let err = g.validate().unwrap_err();
+        assert!(matches!(err, NodeGraphError::Cycle { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_and_zero_rotation() {
+        let mut g = NodeGraph::new();
+        let a = g.push_root(SceneNode {
+            name: "nan".into(),
+            transform: NodeTransform::from_translation([f32::NAN, 0.0, 0.0]),
+            children: vec![],
+        });
+        assert_eq!(
+            g.validate(),
+            Err(NodeGraphError::NonFiniteTransform { node: a })
+        );
+
+        let mut g = NodeGraph::new();
+        let mut m = Mat4::IDENTITY;
+        m.elements[5] = f32::INFINITY;
+        let a = g.push_root(SceneNode {
+            name: "inf".into(),
+            transform: NodeTransform::Matrix(m),
+            children: vec![],
+        });
+        assert_eq!(
+            g.validate(),
+            Err(NodeGraphError::NonFiniteTransform { node: a })
+        );
+
+        let mut g = NodeGraph::new();
+        let a = g.push_root(SceneNode {
+            name: "zeroq".into(),
+            transform: NodeTransform::from_rotation([0.0, 0.0, 0.0, 0.0]),
+            children: vec![],
+        });
+        assert_eq!(g.validate(), Err(NodeGraphError::ZeroRotation { node: a }));
+    }
+
+    #[test]
+    fn parent_indices_maps_whole_graph() {
+        let mut g = NodeGraph::new();
+        let c1 = g.push(SceneNode::named("c1"));
+        let c2 = g.push(SceneNode::named("c2"));
+        let r = g.push_root(SceneNode {
+            name: "r".into(),
+            transform: NodeTransform::IDENTITY,
+            children: vec![c1, c2],
+        });
+        let orphan = g.push(SceneNode::named("orphan"));
+        let parents = g.parent_indices();
+        assert_eq!(parents[c1], Some(r));
+        assert_eq!(parents[c2], Some(r));
+        assert_eq!(parents[r], None);
+        assert_eq!(parents[orphan], None);
+        // Out-of-range lookup is None, not a panic.
+        assert_eq!(g.parent_index(99), None);
+    }
+
+    #[test]
+    fn node_graph_error_display_is_informative() {
+        let e = NodeGraphError::MultipleParents {
+            child: 2,
+            first_parent: 0,
+            second_parent: 1,
+        };
+        let s = e.to_string();
+        assert!(s.contains('2') && s.contains('0') && s.contains('1'), "{s}");
+        // It is a std error.
+        let _: &dyn std::error::Error = &e;
     }
 
     #[test]

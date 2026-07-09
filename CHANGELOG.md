@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `node::NodeGraphError` + `NodeGraph::validate()` — typed validation
+  surface for untrusted node hierarchies. `validate()` checks the
+  strict-tree contract (roots in range and unique, child indices in
+  range, at most one parent per node, no root doubling as a child, no
+  node its own ancestor) plus per-node numeric sanity (finite
+  transform components, normalisable — non-zero-length — TRS rotation
+  quaternions), returning the first defect with the node indices
+  involved. Orphan nodes stay legal (they merely lack a world
+  placement). Companions `NodeGraph::parent_indices()` /
+  `parent_index(i)` expose the parent map computed from the child
+  lists. `NodeGraphError` is re-exported at the crate root.
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core
