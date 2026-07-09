@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-scene/compare/v0.1.4...v0.2.0) - 2026-07-09
+
+### Added
+
+- *(node)* glTF 2.0 node local transform + flat node graph
+
+### Other
+
+- CubicBezier easing doc names only the CSS control-point form
+- describe the scale-track composition rule on its own terms
+- document the completed 3D node + animation surface
+- node_graph_props property suite (7 tests)
+- node_graph + node_animations fields; merge rebases node indices
+- keyframe TRS animation channels (spec §3.11 + Appendix C)
+- quaternion ops — dot/normalize/conjugate/mul/axis-angle/slerp
+- Mat4::decompose_trs + NodeTransform::to_trs
+- Mat4 transpose / determinant / inverse
+- collapse Option matches to ? (clippy 1.97 question_mark)
+- cycle-safe traversal + one-pass global_matrices + walk utilities
+- NodeGraphError + NodeGraph::validate() typed validation surface
+- add CI / crates.io / docs.rs / MIT-license badges
+- refresh to current status, drop per-round changelog cruft
+- indexed material-palette accessors (material/material_mut/material_count/materials_filter)
+- typed PBR metallic-roughness surface + Scene::materials palette
+- LightInstance::irradiance_at folds attenuation into per-channel linear-RGB
+- LightInstance::vector_to + cone_attenuation accessors
+- drop release-plz.toml — use release-plz defaults across the workspace
+- LightInstance + Scene::lights — typed 3D pose for punctual lights
+- typed Light primitive (Directional / Point / Spot)
+- RasterRenderer audio cue mixing into RenderedFrame.audio
+- RasterRenderer ObjectKind::Video(DecodedFrames) composition
+- Background::DecodedImage RGBA8 backdrop composition
+- RasterRenderer ObjectKind::Image(Decoded) composition
+- SVG path Arc (A/a) command lowering
+
 ### Added
 
 - `node::NodeGraphError` + `NodeGraph::validate()` — typed validation
