@@ -96,7 +96,10 @@ pub use material::{
     AlphaMode, Material, NormalTextureBinding, OcclusionTextureBinding, PbrMetallicRoughness,
     TextureBinding,
 };
-pub use node::{Mat4, NodeGraph, NodeGraphError, NodeTransform, SceneNode};
+pub use node::{
+    quat_conjugate, quat_dot, quat_from_axis_angle, quat_mul, quat_normalize, quat_slerp, Mat4,
+    NodeGraph, NodeGraphError, NodeTransform, SceneNode,
+};
 pub use object::{
     BlendMode, Canvas, ClipRect, Effect, ImageSource, LengthUnit, LiveStreamHandle, ObjectKind,
     Sample, SceneObject, Shape, TextRun, Transform, VideoSource,

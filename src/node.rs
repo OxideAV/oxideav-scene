@@ -428,6 +428,106 @@ impl Mat4 {
     }
 }
 
+/// Dot product of two quaternions (as plain 4-vectors, XYZW).
+///
+/// `1.0` for identical unit quaternions, `-1.0` for exact opposites
+/// (which encode the *same* rotation — see [`quat_slerp`]'s
+/// shortest-path handling).
+pub fn quat_dot(a: [f32; 4], b: [f32; 4]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+/// Normalise a quaternion to unit length. A (near-)zero-length input
+/// falls back to the identity quaternion `[0, 0, 0, 1]`, matching
+/// [`Mat4::from_quaternion`]'s degenerate-input rule.
+pub fn quat_normalize(q: [f32; 4]) -> [f32; 4] {
+    let len = quat_dot(q, q).sqrt();
+    if len <= f32::EPSILON {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let inv = 1.0 / len;
+    [q[0] * inv, q[1] * inv, q[2] * inv, q[3] * inv]
+}
+
+/// The conjugate `[-x, -y, -z, w]` — for a unit quaternion, the
+/// inverse rotation.
+pub fn quat_conjugate(q: [f32; 4]) -> [f32; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// Quaternion product `a * b` (XYZW storage, `w` scalar).
+///
+/// Composition order matches the matrix product: rotating by
+/// `quat_mul(a, b)` applies `b` first, then `a`, i.e.
+/// `Mat4::from_quaternion(quat_mul(a, b))` equals
+/// `Mat4::from_quaternion(a).mul(&Mat4::from_quaternion(b))`.
+pub fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let [ax, ay, az, aw] = a;
+    let [bx, by, bz, bw] = b;
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+}
+
+/// A unit quaternion rotating by `angle` radians about `axis`
+/// (right-handed, counter-clockwise looking down the axis toward the
+/// origin). The axis is normalised first; a zero axis yields the
+/// identity quaternion.
+pub fn quat_from_axis_angle(axis: [f32; 3], angle: f32) -> [f32; 4] {
+    let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    if len <= f32::EPSILON {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    let (s, c) = (angle * 0.5).sin_cos();
+    let k = s / len;
+    [axis[0] * k, axis[1] * k, axis[2] * k, c]
+}
+
+/// Spherical linear interpolation between two unit quaternions, the
+/// rotation-channel rule of the animation sampler (Appendix C.4 of
+/// the glTF 2.0 spec).
+///
+/// With `a = arccos(|v_k . v_{k+1}|)` and `s` the sign of the dot
+/// product,
+///
+/// ```text
+/// v_t = sin(a(1 - t)) / sin(a) * v_k  +  s * sin(a t) / sin(a) * v_{k+1}
+/// ```
+///
+/// Taking the absolute value for the angle and multiplying the second
+/// endpoint by the dot's sign keeps the interpolation on the short
+/// path along the great circle. When the angle is close to zero the
+/// spherical weights collapse to regular linear interpolation, which
+/// is used directly (then re-normalised). `t` is clamped to
+/// `[0, 1]`; inputs are normalised defensively.
+pub fn quat_slerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let qa = quat_normalize(a);
+    let qb = quat_normalize(b);
+    let dot = quat_dot(qa, qb);
+    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+    let angle = dot.abs().min(1.0).acos();
+    let sin_angle = angle.sin();
+    let (wa, wb) = if sin_angle > 1e-4 {
+        (
+            ((1.0 - t) * angle).sin() / sin_angle,
+            sign * (t * angle).sin() / sin_angle,
+        )
+    } else {
+        // Near-parallel endpoints: spherical turns into linear.
+        (1.0 - t, sign * t)
+    };
+    quat_normalize([
+        wa * qa[0] + wb * qb[0],
+        wa * qa[1] + wb * qb[1],
+        wa * qa[2] + wb * qb[2],
+        wa * qa[3] + wb * qb[3],
+    ])
+}
+
 /// A node's local-space transform, in either of glTF's two forms.
 ///
 /// A glTF node carries **either** TRS properties **or** a `matrix`,
@@ -1364,6 +1464,90 @@ mod tests {
         assert!(m.inverse().is_none());
         // Identity inverts to itself.
         assert_eq!(Mat4::IDENTITY.inverse(), Some(Mat4::IDENTITY));
+    }
+
+    #[test]
+    fn quat_mul_matches_matrix_composition() {
+        let a = quat_from_axis_angle([0.0, 1.0, 0.0], std::f32::consts::FRAC_PI_2);
+        let b = quat_from_axis_angle([1.0, 0.0, 0.0], std::f32::consts::FRAC_PI_3);
+        let via_quat = Mat4::from_quaternion(quat_mul(a, b));
+        let via_mats = Mat4::from_quaternion(a).mul(&Mat4::from_quaternion(b));
+        assert_mat_approx(&via_quat, &via_mats);
+        // Identity is the unit of the product.
+        let id = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(quat_mul(id, b), b);
+        assert_eq!(quat_mul(a, id), a);
+    }
+
+    #[test]
+    fn quat_conjugate_inverts_rotation() {
+        let q = quat_from_axis_angle([0.3, -0.7, 0.65], 1.234);
+        let prod = quat_mul(q, quat_conjugate(q));
+        assert!(approx(prod[3].abs(), 1.0), "{prod:?}");
+        assert!(approx(prod[0], 0.0) && approx(prod[1], 0.0) && approx(prod[2], 0.0));
+    }
+
+    #[test]
+    fn quat_axis_angle_matches_hand_built() {
+        // 90° about +Y — same quaternion the earlier tests build by hand.
+        let q = quat_from_axis_angle([0.0, 2.0, 0.0], std::f32::consts::FRAC_PI_2);
+        assert!(approx(q[0], 0.0));
+        assert!(approx(q[1], FRAC_PI_4.sin()));
+        assert!(approx(q[2], 0.0));
+        assert!(approx(q[3], FRAC_PI_4.cos()));
+        // Degenerate axis: identity.
+        assert_eq!(quat_from_axis_angle([0.0; 3], 1.0), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn quat_normalize_and_dot() {
+        let q = quat_normalize([0.0, 0.0, 0.0, 2.0]);
+        assert_eq!(q, [0.0, 0.0, 0.0, 1.0]);
+        // Zero-length falls back to identity.
+        assert_eq!(quat_normalize([0.0; 4]), [0.0, 0.0, 0.0, 1.0]);
+        let a = quat_from_axis_angle([0.0, 0.0, 1.0], 0.5);
+        assert!(approx(quat_dot(a, a), 1.0));
+    }
+
+    #[test]
+    fn slerp_endpoints_and_midpoint() {
+        let id = [0.0, 0.0, 0.0, 1.0];
+        let quarter = quat_from_axis_angle([0.0, 0.0, 1.0], std::f32::consts::FRAC_PI_2);
+        // Endpoints returned exactly (up to normalisation).
+        let s0 = quat_slerp(id, quarter, 0.0);
+        let s1 = quat_slerp(id, quarter, 1.0);
+        for i in 0..4 {
+            assert!(approx(s0[i], id[i]));
+            assert!(approx(s1[i], quarter[i]));
+        }
+        // Midpoint of identity -> 90° about Z is 45° about Z.
+        let mid = quat_slerp(id, quarter, 0.5);
+        let expected = quat_from_axis_angle([0.0, 0.0, 1.0], FRAC_PI_4);
+        for i in 0..4 {
+            assert!(approx(mid[i], expected[i]), "{mid:?} vs {expected:?}");
+        }
+    }
+
+    #[test]
+    fn slerp_takes_the_short_path() {
+        // b and -b encode the same rotation; slerp(a, -b, t) must
+        // produce the same *rotation* as slerp(a, b, t).
+        let a = quat_from_axis_angle([0.0, 1.0, 0.0], 0.3);
+        let b = quat_from_axis_angle([0.0, 1.0, 0.0], 1.1);
+        let neg_b = [-b[0], -b[1], -b[2], -b[3]];
+        let s = quat_slerp(a, b, 0.25);
+        let s_neg = quat_slerp(a, neg_b, 0.25);
+        assert_mat_approx(&Mat4::from_quaternion(s), &Mat4::from_quaternion(s_neg));
+    }
+
+    #[test]
+    fn slerp_near_parallel_falls_back_to_lerp() {
+        let a = quat_from_axis_angle([1.0, 0.0, 0.0], 0.0);
+        let b = quat_from_axis_angle([1.0, 0.0, 0.0], 1e-6);
+        let mid = quat_slerp(a, b, 0.5);
+        // Still unit length, still (approximately) the identity.
+        assert!(approx(quat_dot(mid, mid), 1.0));
+        assert!(approx(mid[3], 1.0));
     }
 
     /// Assert two matrices agree element-wise within tolerance.

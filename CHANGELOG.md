@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   column, or a non-orthogonal (sheared) basis. `to_trs()` converts
   the `Matrix` form into the animatable `Trs` form (animation
   channels may only target TRS nodes).
+- `node` quaternion operations (XYZW, `w` scalar — the node-rotation
+  storage order): `quat_dot`, `quat_normalize` (zero-length falls
+  back to identity), `quat_conjugate` (inverse rotation for unit
+  input), `quat_mul` (Hamilton product; composition order matches the
+  matrix product), `quat_from_axis_angle`, and `quat_slerp` —
+  spherical linear interpolation per the animation-sampler rotation
+  rule (Appendix C.4 of the glTF 2.0 spec): angle from the absolute
+  dot product with the second endpoint sign-flipped so interpolation
+  follows the short great-circle path, collapsing to linear
+  interpolation (re-normalised) when the endpoints are near-parallel.
+  All re-exported at the crate root.
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core
