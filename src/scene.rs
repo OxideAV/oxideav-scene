@@ -10,6 +10,8 @@ use crate::duration::{Lifetime, SceneDuration, TimeStamp};
 use crate::id::ObjectId;
 use crate::light::LightInstance;
 use crate::material::Material;
+use crate::node::NodeGraph;
+use crate::node_animation::NodeAnimation;
 use crate::object::{Canvas, SceneObject};
 use crate::ops::Operation;
 use crate::page::Page;
@@ -93,6 +95,31 @@ pub struct Scene {
     /// Empty by default. Ordering is preserved verbatim so importers
     /// can keep their source indices stable across a round-trip.
     pub materials: Vec<Material>,
+    /// 3D node hierarchy for scenes that carry 3D content.
+    ///
+    /// The placement companion to [`Self::lights`] (energy) and
+    /// [`Self::materials`] (surface response): a flat,
+    /// index-addressed [`NodeGraph`] whose per-node local transforms
+    /// compose up the parent chain into world space. Like the other
+    /// 3D lists this is round-trip storage for 3D-scene readers /
+    /// writers — the 2D `RasterRenderer` ignores it entirely. Node
+    /// indices are stable; [`Scene::merge`] rebases the merged-in
+    /// graph's indices so existing references keep meaning.
+    ///
+    /// Empty by default.
+    pub node_graph: NodeGraph,
+    /// Keyframe animations targeting [`Self::node_graph`] nodes.
+    ///
+    /// Each [`NodeAnimation`] is a self-contained action (e.g.
+    /// "Walk", "Spin") with its own `t = 0` origin in seconds —
+    /// the storage model defines no playback order, auto-start, or
+    /// loop semantics, so these are **not** shifted by
+    /// [`Scene::merge`]'s `time_offset` (which operates on the 2D
+    /// timeline's tick clock). Channel target indices are rebased on
+    /// merge together with the node graph.
+    ///
+    /// Empty by default.
+    pub node_animations: Vec<NodeAnimation>,
 }
 
 impl Default for Scene {
@@ -110,6 +137,8 @@ impl Default for Scene {
             pages: None,
             lights: Vec::new(),
             materials: Vec::new(),
+            node_graph: NodeGraph::new(),
+            node_animations: Vec::new(),
         }
     }
 }
@@ -383,6 +412,31 @@ impl Scene {
         // material index, merge will need to rebase those indices by
         // `self.materials.len()` before extending.
         self.materials.extend(other.materials.iter().cloned());
+
+        // Node graph: concatenate with every index (children, roots,
+        // animation channel targets) rebased past our existing nodes
+        // so both hierarchies keep their meaning side by side.
+        let node_base = self.node_graph.nodes.len();
+        for node in &other.node_graph.nodes {
+            let mut shifted = node.clone();
+            for child in shifted.children.iter_mut() {
+                *child += node_base;
+            }
+            self.node_graph.nodes.push(shifted);
+        }
+        self.node_graph
+            .roots
+            .extend(other.node_graph.roots.iter().map(|r| r + node_base));
+        for anim in &other.node_animations {
+            let mut shifted = anim.clone();
+            for channel in shifted.channels.iter_mut() {
+                channel.target_node += node_base;
+            }
+            self.node_animations.push(shifted);
+        }
+        // Node animations are self-contained actions on their own
+        // seconds clock — `time_offset` (2D timeline ticks) does not
+        // apply to them.
 
         // Extend our duration to cover any reach past the current end
         // for finite scenes. Indefinite stays indefinite.
@@ -1160,6 +1214,67 @@ mod tests {
             .unwrap_err();
         assert_eq!(receipts.len(), 1);
         assert_eq!(err, "object id not found");
+    }
+
+    #[test]
+    fn merge_rebases_node_graph_and_animation_targets() {
+        use crate::node::{NodeTransform, SceneNode};
+        use crate::node_animation::{
+            AnimationChannel, AnimationSampler, Interpolation, NodeAnimation, TargetPath,
+        };
+
+        // Scene A: a single root node.
+        let mut a = Scene::default();
+        let a_root = a.node_graph.push_root(SceneNode::named("a-root"));
+
+        // Scene B: root -> child, plus an animation on its child.
+        let mut b = Scene::default();
+        let b_child = b.node_graph.push(SceneNode {
+            name: "b-child".into(),
+            transform: NodeTransform::from_translation([1.0, 0.0, 0.0]),
+            children: vec![],
+        });
+        let b_root = b.node_graph.push_root(SceneNode {
+            name: "b-root".into(),
+            transform: NodeTransform::IDENTITY,
+            children: vec![b_child],
+        });
+        b.node_animations.push(NodeAnimation {
+            name: "slide".into(),
+            samplers: vec![AnimationSampler {
+                input: vec![0.0, 1.0],
+                interpolation: Interpolation::Linear,
+                output: vec![0.0, 0.0, 0.0, 5.0, 0.0, 0.0],
+            }],
+            channels: vec![AnimationChannel {
+                sampler: 0,
+                target_node: b_child,
+                path: TargetPath::Translation,
+            }],
+        });
+
+        a.merge(&b, 0, 0);
+
+        // A's own node is untouched; B's nodes landed after it with
+        // children / roots rebased.
+        assert_eq!(a.node_graph.len(), 3);
+        assert_eq!(a.node_graph.roots, vec![a_root, b_root + 1]);
+        assert_eq!(a.node_graph.node(b_root + 1).unwrap().name, "b-root");
+        assert_eq!(
+            a.node_graph.node(b_root + 1).unwrap().children,
+            vec![b_child + 1]
+        );
+        // The merged graph still validates as disjoint strict trees.
+        assert_eq!(a.node_graph.validate(), Ok(()));
+
+        // The animation still targets the same (rebased) child, and
+        // still validates + samples against the merged graph.
+        let anim = &a.node_animations[0];
+        assert_eq!(anim.channels[0].target_node, b_child + 1);
+        assert_eq!(anim.validate(&a.node_graph), Ok(()));
+        let gm = anim.global_matrices_at(&a.node_graph, 1.0);
+        let origin = gm[b_child + 1].unwrap().transform_point([0.0, 0.0, 0.0]);
+        assert!((origin[0] - 5.0).abs() < 1e-5, "{origin:?}");
     }
 
     #[test]

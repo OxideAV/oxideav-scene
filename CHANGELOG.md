@@ -82,6 +82,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   composes the posed locals up the parent chain (cycle-safe, `None`
   for orphans). Morph-target `weights` is deferred until `SceneNode`
   carries weights. Types re-exported at the crate root.
+- `Scene::node_graph` + `Scene::node_animations` — the scene now
+  carries the 3D placement (a `NodeGraph`) and its keyframe
+  animations alongside the existing `lights` / `materials` 3D lists,
+  completing the typed landing place for 3D-scene readers / writers
+  (the 2D `RasterRenderer` ignores them). `Scene::merge` concatenates
+  the merged-in graph with every index rebased (children, roots,
+  animation channel targets) so both hierarchies keep their meaning
+  side by side; node animations are self-contained actions on their
+  own seconds clock and are deliberately not shifted by `merge`'s
+  tick-based `time_offset`.
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core
