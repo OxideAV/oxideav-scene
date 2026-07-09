@@ -111,10 +111,31 @@ raster renderer. Encoding and file-format I/O are still follow-ups.
     `fresnel`) as methods. `Scene::materials` is the palette
     (`push_material` / `material` / `materials_filter`).
   - `node` — `Mat4` / `NodeTransform` / `SceneNode` / `NodeGraph`
-    column-major node-transform graph per the glTF 2.0 core spec, with
-    `global_matrix` parent-chain folding and a cycle-guarded `visit`
-    depth-first traversal. Right-handed, `+Y` up, `+Z` forward.
-  `Scene::merge` concatenates lights and materials verbatim.
+    column-major node-transform graph per the glTF 2.0 core spec.
+    Right-handed, `+Y` up, `+Z` forward. `Mat4` carries the full
+    linear-algebra kit (`mul`, `transpose`, `determinant`, `inverse`,
+    `decompose_trs` back to translation/quaternion/scale — `None` on
+    sheared / non-affine / collapsed input) plus quaternion ops
+    (`quat_mul` / `quat_slerp` shortest-path spherical interpolation /
+    `quat_from_axis_angle` / conjugate / normalize). `NodeGraph`
+    resolves hierarchy: one-pass `global_matrices`, cycle-safe
+    `visit` / `visit_subtree`, `ancestors` / `descendants` /
+    `path_from_root` / `find_by_name` / `parent_indices`, and
+    `validate()` returning typed `NodeGraphError`s (index bounds,
+    multi-parent, cycles, non-finite transforms, zero-length
+    rotations).
+  - `node_animation` — keyframe animation of node TRS properties per
+    the glTF 2.0 animation model (§3.11 + Appendix C):
+    `NodeAnimation` / `AnimationChannel` / `AnimationSampler` with
+    `Step` / `Linear` (slerp for rotations) / `CubicSpline` (Hermite
+    with duration-scaled tangents, rotations re-normalised)
+    interpolation, exact-timestamp passthrough, end-clamping,
+    `validate(&graph)` with typed `NodeAnimationError`s, and
+    `local_transforms_at` / `global_matrices_at` posed resolution.
+  `Scene::node_graph` + `Scene::node_animations` carry both on the
+  scene; `Scene::merge` concatenates lights and materials verbatim
+  and rebases node-graph indices (children, roots, channel targets)
+  so merged hierarchies keep their meaning.
 - No `oxideav-codec` or container integration yet — that comes after
   the render pipeline is real.
 
@@ -136,6 +157,8 @@ pub struct Scene {
     pub pages: Option<Vec<Page>>,     // Some(_) → paged-content mode (PDF / TIFF / EPUB)
     pub lights: Vec<LightInstance>,   // 3D punctual lights for scenes carrying 3D content
     pub materials: Vec<Material>,     // PBR material palette for 3D round-trips
+    pub node_graph: NodeGraph,        // 3D node hierarchy (placement)
+    pub node_animations: Vec<NodeAnimation>, // keyframe TRS animations over node_graph
 }
 ```
 
@@ -486,7 +509,8 @@ src/
 ├── paint.rs         — Paint + Gradient (multi-stop linear / radial)
 ├── light.rs         — Light / LightInstance (3D punctual lights)
 ├── material.rs      — Material / PbrMetallicRoughness / AlphaMode (3D PBR palette)
-├── node.rs          — Mat4 / NodeTransform / SceneNode / NodeGraph (3D node transform graph)
+├── node.rs          — Mat4 / NodeTransform / SceneNode / NodeGraph (3D node transform graph + quaternion ops)
+├── node_animation.rs — NodeAnimation / AnimationChannel / AnimationSampler (keyframe TRS animation)
 └── svg_path.rs      — SVG 1.1 path-data string → oxideav_core::Path
 ```
 
