@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placement). Companions `NodeGraph::parent_indices()` /
   `parent_index(i)` expose the parent map computed from the child
   lists. `NodeGraphError` is re-exported at the crate root.
+- `node::NodeGraph` walk / resolution utilities:
+  `global_matrices()` (every node's world matrix resolved in one pass;
+  `None` for orphans), `visit_subtree(start, f)` (depth-first over the
+  subtree at `start`, matrices relative to `start`'s parent space),
+  `descendants(start)` (subtree indices, depth-first, inclusive),
+  `ancestors(index)` (parent chain, nearest first),
+  `path_from_root(index)` (root-down inclusive path, `None` when
+  unreachable), and `find_by_name(name)` (first exact match).
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core
@@ -388,6 +396,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the top level so they don't paint twice. 5 integration tests
   cover composition, opacity multiplication, missing-id tolerance,
   cycle termination, and group-clip intersection.
+
+### Fixed
+
+- `node::NodeGraph::visit` / `global_matrix` no longer overflow the
+  stack on malformed cyclic input involving more than one node (the
+  previous guard only caught a node listing *itself* as a child; a
+  two-node loop `a -> b -> a` recursed unboundedly). Traversal now
+  tracks visited nodes and enters each node at most once, which also
+  terminates multi-parent diamond shares.
 
 ## [0.1.4](https://github.com/OxideAV/oxideav-scene/compare/v0.1.3...v0.1.4) - 2026-05-29
 

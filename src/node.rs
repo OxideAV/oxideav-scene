@@ -718,37 +718,30 @@ impl NodeGraph {
         if index >= self.nodes.len() {
             return None;
         }
-        // Walk down from every root, accumulating the matrix product,
-        // until we reach `index`. Disjoint strict trees guarantee a
-        // single path if one exists.
-        for &root in &self.roots {
-            if let Some(m) = self.descend(root, Mat4::IDENTITY, index) {
-                return Some(m);
+        let mut found = None;
+        self.visit(|i, _node, gm| {
+            if i == index && found.is_none() {
+                found = Some(gm);
             }
-        }
-        None
+        });
+        found
     }
 
-    /// Depth-first search from `current` (whose accumulated parent
-    /// matrix is `acc_parent`) for `target`, returning the target's
-    /// global matrix when found.
-    fn descend(&self, current: usize, acc_parent: Mat4, target: usize) -> Option<Mat4> {
-        let node = self.nodes.get(current)?;
-        let global = acc_parent.mul(&node.local_matrix());
-        if current == target {
-            return Some(global);
-        }
-        for &child in &node.children {
-            // Guard against a malformed self-referential child to avoid
-            // unbounded recursion on a cyclic input.
-            if child == current {
-                continue;
+    /// The global (world-space) matrix of **every** node, resolved in
+    /// one pass over the hierarchy.
+    ///
+    /// `result[i]` is `Some(global)` when node `i` is reachable from a
+    /// root, `None` for orphans. Prefer this over per-node
+    /// [`NodeGraph::global_matrix`] calls when resolving more than one
+    /// node — the whole graph is walked exactly once.
+    pub fn global_matrices(&self) -> Vec<Option<Mat4>> {
+        let mut out = vec![None; self.nodes.len()];
+        self.visit(|i, _node, gm| {
+            if out[i].is_none() {
+                out[i] = Some(gm);
             }
-            if let Some(found) = self.descend(child, global, target) {
-                return Some(found);
-            }
-        }
-        None
+        });
+        out
     }
 
     /// Visit every node reachable from the roots in depth-first paint
@@ -757,30 +750,104 @@ impl NodeGraph {
     /// The global matrix is accumulated on the way down, so each node is
     /// visited exactly once with its correct world transform — far
     /// cheaper than calling [`Self::global_matrix`] per node (which
-    /// re-walks from the roots each time).
+    /// re-walks from the roots each time). Malformed inputs (cycles,
+    /// diamond shares) are tolerated: an already-visited node is never
+    /// entered twice, so traversal always terminates.
     pub fn visit<F: FnMut(usize, &SceneNode, Mat4)>(&self, mut visit: F) {
+        let mut visited = vec![false; self.nodes.len()];
         for &root in &self.roots {
-            self.visit_from(root, Mat4::IDENTITY, &mut visit);
+            self.visit_from(root, Mat4::IDENTITY, &mut visited, &mut visit);
         }
+    }
+
+    /// Visit the subtree hanging off `start` (inclusive) in depth-first
+    /// order, invoking `visit(index, &node, matrix)`.
+    ///
+    /// Matrices are **relative to `start`'s parent space**: the
+    /// accumulator begins at identity, so `start` itself is visited
+    /// with its local matrix. To get world-space matrices for the
+    /// subtree, pre-multiply each result by
+    /// `global_matrix(parent_of(start))`. No-op when `start` is out of
+    /// range. Cycle-safe like [`NodeGraph::visit`].
+    pub fn visit_subtree<F: FnMut(usize, &SceneNode, Mat4)>(&self, start: usize, mut visit: F) {
+        let mut visited = vec![false; self.nodes.len()];
+        self.visit_from(start, Mat4::IDENTITY, &mut visited, &mut visit);
     }
 
     fn visit_from<F: FnMut(usize, &SceneNode, Mat4)>(
         &self,
         current: usize,
         acc_parent: Mat4,
+        visited: &mut [bool],
         visit: &mut F,
     ) {
         let Some(node) = self.nodes.get(current) else {
             return;
         };
+        // Guard against malformed cycles / multi-parent shares: enter
+        // each node at most once so traversal terminates.
+        if visited[current] {
+            return;
+        }
+        visited[current] = true;
         let global = acc_parent.mul(&node.local_matrix());
         visit(current, node, global);
         for &child in &node.children {
-            if child == current {
-                continue;
-            }
-            self.visit_from(child, global, visit);
+            self.visit_from(child, global, visited, visit);
         }
+    }
+
+    /// The indices of the subtree rooted at `start`, inclusive, in
+    /// depth-first order (`start` first). Empty when `start` is out of
+    /// range.
+    pub fn descendants(&self, start: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.visit_subtree(start, |i, _, _| out.push(i));
+        out
+    }
+
+    /// The ancestor chain of `index`, nearest parent first, ending at
+    /// the chain's topmost node. Empty for roots / orphans / an
+    /// out-of-range index. Terminates on malformed cyclic input.
+    pub fn ancestors(&self, index: usize) -> Vec<usize> {
+        let parents = self.parent_indices();
+        let mut out = Vec::new();
+        if index >= self.nodes.len() {
+            return out;
+        }
+        let mut current = index;
+        while let Some(parent) = parents[current] {
+            if out.len() > self.nodes.len() {
+                break; // cycle guard
+            }
+            out.push(parent);
+            current = parent;
+        }
+        out
+    }
+
+    /// The path from the containing root down to `index`, inclusive
+    /// (`path[0]` is the root, `path.last()` is `index`). `None` when
+    /// `index` is out of range or not reachable from any root.
+    pub fn path_from_root(&self, index: usize) -> Option<Vec<usize>> {
+        if index >= self.nodes.len() {
+            return None;
+        }
+        let mut path: Vec<usize> = self.ancestors(index);
+        path.reverse();
+        path.push(index);
+        // Reachability: the chain's top must be a listed root.
+        if self.roots.contains(&path[0]) {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// The index of the first node (in storage order) whose name
+    /// matches `name` exactly, or `None`.
+    pub fn find_by_name(&self, name: &str) -> Option<usize> {
+        self.nodes.iter().position(|n| n.name == name)
     }
 }
 
@@ -1016,6 +1083,131 @@ mod tests {
         assert!(approx3(seen[0].1, [10.0, 0.0, 0.0]));
         assert_eq!(seen[1].0, c);
         assert!(approx3(seen[1].1, [15.0, 0.0, 0.0]));
+    }
+
+    /// A 4-node fixture: root -> (a -> leaf, b), plus an orphan.
+    /// Root translates +X 10, a translates +Y 5, leaf translates +Z 2.
+    fn fixture() -> (NodeGraph, usize, usize, usize, usize, usize) {
+        let mut g = NodeGraph::new();
+        let leaf = g.push(SceneNode {
+            name: "leaf".into(),
+            transform: NodeTransform::from_translation([0.0, 0.0, 2.0]),
+            children: vec![],
+        });
+        let a = g.push(SceneNode {
+            name: "a".into(),
+            transform: NodeTransform::from_translation([0.0, 5.0, 0.0]),
+            children: vec![leaf],
+        });
+        let b = g.push(SceneNode {
+            name: "b".into(),
+            transform: NodeTransform::IDENTITY,
+            children: vec![],
+        });
+        let root = g.push_root(SceneNode {
+            name: "root".into(),
+            transform: NodeTransform::from_translation([10.0, 0.0, 0.0]),
+            children: vec![a, b],
+        });
+        let orphan = g.push(SceneNode::named("orphan"));
+        (g, root, a, b, leaf, orphan)
+    }
+
+    #[test]
+    fn two_node_cycle_terminates() {
+        // a -> b and b -> a: malformed, but traversal must not hang or
+        // overflow the stack (regression: the old guard only caught
+        // self-loops).
+        let mut g = NodeGraph::new();
+        let a = g.push(SceneNode::named("a"));
+        let b = g.push(SceneNode::named("b"));
+        g.nodes[a].children.push(b);
+        g.nodes[b].children.push(a);
+        g.roots.push(a);
+        let mut count = 0;
+        g.visit(|_, _, _| count += 1);
+        assert_eq!(count, 2); // each node entered exactly once
+        assert!(g.global_matrix(b).is_some());
+        assert_eq!(g.descendants(a), vec![a, b]);
+        // ancestors() also terminates on the cyclic parent chain.
+        let anc = g.ancestors(a);
+        assert!(anc.len() <= g.len() + 1);
+    }
+
+    #[test]
+    fn global_matrices_resolves_whole_graph_in_one_pass() {
+        let (g, root, a, b, leaf, orphan) = fixture();
+        let gms = g.global_matrices();
+        assert_eq!(gms.len(), g.len());
+        // Reachable nodes match per-node global_matrix.
+        for idx in [root, a, b, leaf] {
+            assert_eq!(gms[idx], g.global_matrix(idx), "node {idx}");
+        }
+        // Orphan has no world placement.
+        assert_eq!(gms[orphan], None);
+        // Closed form: leaf origin = (10, 5, 2).
+        let p = gms[leaf].unwrap().transform_point([0.0, 0.0, 0.0]);
+        assert!(approx3(p, [10.0, 5.0, 2.0]), "{p:?}");
+    }
+
+    #[test]
+    fn visit_subtree_is_relative_to_parent_space() {
+        let (g, _root, a, _b, leaf, _orphan) = fixture();
+        // Subtree at `a`: matrices are relative to a's parent space, so
+        // a's own matrix is its local (+Y 5) and leaf's is (+Y 5, +Z 2).
+        let mut seen = Vec::new();
+        g.visit_subtree(a, |i, _, m| seen.push((i, m.transform_point([0.0; 3]))));
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, a);
+        assert!(approx3(seen[0].1, [0.0, 5.0, 0.0]));
+        assert_eq!(seen[1].0, leaf);
+        assert!(approx3(seen[1].1, [0.0, 5.0, 2.0]));
+        // Out-of-range start is a no-op.
+        let mut n = 0;
+        g.visit_subtree(99, |_, _, _| n += 1);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn descendants_and_ancestors() {
+        let (g, root, a, b, leaf, orphan) = fixture();
+        assert_eq!(g.descendants(root), vec![root, a, leaf, b]);
+        assert_eq!(g.descendants(leaf), vec![leaf]);
+        assert_eq!(g.descendants(99), Vec::<usize>::new());
+
+        assert_eq!(g.ancestors(leaf), vec![a, root]);
+        assert_eq!(g.ancestors(a), vec![root]);
+        assert_eq!(g.ancestors(root), Vec::<usize>::new());
+        assert_eq!(g.ancestors(orphan), Vec::<usize>::new());
+        assert_eq!(g.ancestors(99), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn path_from_root_walks_top_down() {
+        let (g, root, a, _b, leaf, orphan) = fixture();
+        assert_eq!(g.path_from_root(leaf), Some(vec![root, a, leaf]));
+        assert_eq!(g.path_from_root(root), Some(vec![root]));
+        // Orphans and out-of-range have no root path.
+        assert_eq!(g.path_from_root(orphan), None);
+        assert_eq!(g.path_from_root(99), None);
+        // A parented chain whose top is not a listed root is unreachable.
+        let mut g2 = NodeGraph::new();
+        let c = g2.push(SceneNode::named("c"));
+        let _p = g2.push(SceneNode {
+            name: "p".into(),
+            transform: NodeTransform::IDENTITY,
+            children: vec![c],
+        });
+        // p is never pushed as root.
+        assert_eq!(g2.path_from_root(c), None);
+    }
+
+    #[test]
+    fn find_by_name_first_match() {
+        let (g, root, _a, _b, leaf, _orphan) = fixture();
+        assert_eq!(g.find_by_name("root"), Some(root));
+        assert_eq!(g.find_by_name("leaf"), Some(leaf));
+        assert_eq!(g.find_by_name("nope"), None);
     }
 
     #[test]
