@@ -209,8 +209,7 @@ pub enum Easing {
     EaseIn,
     EaseOut,
     EaseInOut,
-    /// CSS `cubic-bezier(x1, y1, x2, y2)`; Adobe After Effects
-    /// compatible.
+    /// CSS `cubic-bezier(x1, y1, x2, y2)` control points.
     CubicBezier(f32, f32, f32, f32),
     /// `N` discrete steps (staircase).
     Step(u32),
