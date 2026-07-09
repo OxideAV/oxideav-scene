@@ -68,6 +68,7 @@ pub mod id;
 pub mod light;
 pub mod material;
 pub mod node;
+pub mod node_animation;
 pub mod object;
 pub mod ops;
 pub mod page;
@@ -99,6 +100,10 @@ pub use material::{
 pub use node::{
     quat_conjugate, quat_dot, quat_from_axis_angle, quat_mul, quat_normalize, quat_slerp, Mat4,
     NodeGraph, NodeGraphError, NodeTransform, SceneNode,
+};
+pub use node_animation::{
+    AnimationChannel, AnimationSampler, Interpolation, NodeAnimation, NodeAnimationError,
+    SampledValue, TargetPath,
 };
 pub use object::{
     BlendMode, Canvas, ClipRect, Effect, ImageSource, LengthUnit, LiveStreamHandle, ObjectKind,

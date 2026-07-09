@@ -57,6 +57,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follows the short great-circle path, collapsing to linear
   interpolation (re-normalised) when the endpoints are near-parallel.
   All re-exported at the crate root.
+- `node_animation` module — keyframe animation of 3D node TRS
+  properties per the glTF 2.0 core animation model (§3.11 + Appendix
+  C): `NodeAnimation` (named set of channels + samplers),
+  `AnimationChannel` (sampler x target node x `TargetPath`
+  translation / rotation / scale), and `AnimationSampler` (strictly
+  increasing timestamp `input` in seconds + flat `output` values +
+  `Interpolation`). Sampling implements Appendix C exactly: `Step`
+  holds `v_k`; `Linear` lerps componentwise except rotations, which
+  slerp along the short great-circle path; `CubicSpline` evaluates
+  the Hermite form over per-keyframe in-tangent / value / out-tangent
+  triples with the segment-duration factor on both tangent terms, and
+  normalises interpolated rotations. Exact-timestamp hits use the
+  stored value as-is, and outside the input range the output clamps
+  to the nearest end (an animation starting at `t = 10` plays its
+  first value from `t = 0`). `validate(&graph)` returns typed
+  `NodeAnimationError`s (sampler / node index range, duplicate
+  `(node, path)` target, matrix-form node targeted — only TRS may be
+  animated —, empty / non-increasing / non-finite input, output
+  length mismatch, cubic spline with < 2 keyframes). `duration()`
+  reports the animation span; `local_transforms_at(&graph, t)`
+  overlays sampled properties on the base transforms (non-animated
+  properties keep their values); `global_matrices_at(&graph, t)`
+  composes the posed locals up the parent chain (cycle-safe, `None`
+  for orphans). Morph-target `weights` is deferred until `SceneNode`
+  carries weights. Types re-exported at the crate root.
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core
