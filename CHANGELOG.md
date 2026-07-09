@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ancestors(index)` (parent chain, nearest first),
   `path_from_root(index)` (root-down inclusive path, `None` when
   unreachable), and `find_by_name(name)` (first exact match).
+- `node::Mat4` linear-algebra completion: `transpose()`,
+  `determinant()` (cofactor expansion; `sx * sy * sz` for a TRS
+  matrix), and `inverse()` (adjugate over determinant, `None` for
+  singular — e.g. zero-scale — or non-finite matrices), enabling
+  world-to-local mapping and picking on top of the node graph.
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core

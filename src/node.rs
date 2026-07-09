@@ -236,6 +236,79 @@ impl Mat4 {
         }
     }
 
+    /// The transpose: rows become columns. For a pure rotation the
+    /// transpose is the inverse (orthonormal basis).
+    pub fn transpose(&self) -> Mat4 {
+        let mut out = [0.0f32; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                out[row * 4 + col] = self.elements[col * 4 + row];
+            }
+        }
+        Mat4 { elements: out }
+    }
+
+    /// The determinant of the 3x3 minor obtained by deleting
+    /// `skip_row` / `skip_col`.
+    fn minor3(&self, skip_row: usize, skip_col: usize) -> f32 {
+        let mut sub = [0.0f32; 9];
+        let mut i = 0;
+        for col in 0..4 {
+            if col == skip_col {
+                continue;
+            }
+            for row in 0..4 {
+                if row == skip_row {
+                    continue;
+                }
+                sub[i] = self.get(row, col);
+                i += 1;
+            }
+        }
+        // sub is column-major 3x3.
+        sub[0] * (sub[4] * sub[8] - sub[5] * sub[7]) - sub[3] * (sub[1] * sub[8] - sub[2] * sub[7])
+            + sub[6] * (sub[1] * sub[5] - sub[2] * sub[4])
+    }
+
+    /// The determinant, by cofactor expansion along the first column.
+    ///
+    /// For a TRS matrix this is `sx * sy * sz` (rotation contributes
+    /// `1`, translation nothing) — a negative value means the basis is
+    /// mirrored, zero means the transform collapses a dimension (and
+    /// [`Mat4::inverse`] returns `None`).
+    pub fn determinant(&self) -> f32 {
+        let mut det = 0.0;
+        let mut sign = 1.0;
+        for row in 0..4 {
+            det += sign * self.get(row, 0) * self.minor3(row, 0);
+            sign = -sign;
+        }
+        det
+    }
+
+    /// The inverse matrix, or `None` when the matrix is singular (zero
+    /// determinant — e.g. a scale of zero on some axis) or non-finite.
+    ///
+    /// Computed via the adjugate: `inv[r][c] = (-1)^(r+c) *
+    /// minor(c, r) / det`. `M.mul(&M.inverse().unwrap())` is the
+    /// identity up to floating-point rounding.
+    pub fn inverse(&self) -> Option<Mat4> {
+        let det = self.determinant();
+        if !det.is_finite() || det.abs() <= f32::MIN_POSITIVE {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        let mut out = [0.0f32; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                let sign = if (row + col) % 2 == 0 { 1.0 } else { -1.0 };
+                // Adjugate: cofactor of the *transposed* position.
+                out[col * 4 + row] = sign * self.minor3(col, row) * inv_det;
+            }
+        }
+        Some(Mat4 { elements: out })
+    }
+
     /// Transform a direction `[x, y, z]` (implicit `w = 0`) — the
     /// translation column is ignored, so a unit axis is rotated /
     /// scaled but not displaced.
@@ -1083,6 +1156,86 @@ mod tests {
         assert!(approx3(seen[0].1, [10.0, 0.0, 0.0]));
         assert_eq!(seen[1].0, c);
         assert!(approx3(seen[1].1, [15.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn transpose_swaps_rows_and_columns() {
+        let m = Mat4::from_translation([1.0, 2.0, 3.0]);
+        let t = m.transpose();
+        assert_eq!(t.row(3), [1.0, 2.0, 3.0, 1.0]);
+        assert_eq!(t.col(3), [0.0, 0.0, 0.0, 1.0]);
+        // Involution.
+        assert_eq!(t.transpose(), m);
+        // Rotation transpose is its inverse.
+        let r = Mat4::from_quaternion([0.0, FRAC_PI_4.sin(), 0.0, FRAC_PI_4.cos()]);
+        let prod = r.mul(&r.transpose());
+        for i in 0..16 {
+            assert!(approx(prod.elements[i], Mat4::IDENTITY.elements[i]));
+        }
+    }
+
+    #[test]
+    fn determinant_closed_forms() {
+        assert!(approx(Mat4::IDENTITY.determinant(), 1.0));
+        // Scale: product of the axes.
+        assert!(approx(
+            Mat4::from_scale([2.0, 3.0, 4.0]).determinant(),
+            24.0
+        ));
+        // Mirrored basis: negative.
+        assert!(approx(
+            Mat4::from_scale([-1.0, 1.0, 1.0]).determinant(),
+            -1.0
+        ));
+        // Rotation: 1. Translation: no contribution.
+        let r = Mat4::from_quaternion([0.5, 0.5, 0.5, 0.5]);
+        assert!(approx(r.determinant(), 1.0));
+        assert!(approx(
+            Mat4::from_translation([9.0, -3.0, 7.0]).determinant(),
+            1.0
+        ));
+        // TRS: det == sx * sy * sz.
+        let trs = NodeTransform::Trs {
+            translation: [1.0, 2.0, 3.0],
+            rotation: [0.0, 0.0, FRAC_PI_4.sin(), FRAC_PI_4.cos()],
+            scale: [2.0, 0.5, 3.0],
+        };
+        assert!(approx(trs.local_matrix().determinant(), 3.0));
+    }
+
+    #[test]
+    fn inverse_round_trips_trs() {
+        let m = NodeTransform::Trs {
+            translation: [4.0, -2.0, 9.0],
+            rotation: [0.0, FRAC_PI_4.sin(), 0.0, FRAC_PI_4.cos()],
+            scale: [2.0, 3.0, 0.5],
+        }
+        .local_matrix();
+        let inv = m.inverse().unwrap();
+        let prod = m.mul(&inv);
+        for i in 0..16 {
+            assert!(
+                approx(prod.elements[i], Mat4::IDENTITY.elements[i]),
+                "element {i}: {}",
+                prod.elements[i]
+            );
+        }
+        // A point maps there and back.
+        let p = [1.5, -7.0, 2.25];
+        let back = inv.transform_point(m.transform_point(p));
+        assert!(approx3(back, p), "{back:?}");
+    }
+
+    #[test]
+    fn inverse_of_singular_is_none() {
+        // Zero scale on one axis collapses a dimension.
+        assert!(Mat4::from_scale([1.0, 0.0, 1.0]).inverse().is_none());
+        // Non-finite input.
+        let mut m = Mat4::IDENTITY;
+        m.elements[0] = f32::NAN;
+        assert!(m.inverse().is_none());
+        // Identity inverts to itself.
+        assert_eq!(Mat4::IDENTITY.inverse(), Some(Mat4::IDENTITY));
     }
 
     /// A 4-node fixture: root -> (a -> leaf, b), plus an orphan.
