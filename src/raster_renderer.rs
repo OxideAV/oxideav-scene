@@ -406,19 +406,10 @@ fn lower_object(
     let clip_path = state.clip.map(|c| rect_path(c.x, c.y, c.width, c.height));
 
     let children = match &obj.kind {
-        ObjectKind::Shape(s) => match shape_node(s) {
-            Some(n) => vec![n],
-            None => return None,
-        },
+        ObjectKind::Shape(s) => vec![shape_node(s)?],
         ObjectKind::Vector(vf) => vec![Node::Group(vf.root.clone())],
-        ObjectKind::Image(src) => match image_node(src) {
-            Some(n) => vec![n],
-            None => return None,
-        },
-        ObjectKind::Video(src) => match video_node(src, ctx.t, obj.lifetime.start) {
-            Some(n) => vec![n],
-            None => return None,
-        },
+        ObjectKind::Image(src) => vec![image_node(src)?],
+        ObjectKind::Video(src) => vec![video_node(src, ctx.t, obj.lifetime.start)?],
         ObjectKind::Group(ids) => {
             let mut nodes = Vec::new();
             for child_id in ids {
