@@ -92,6 +92,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   side by side; node animations are self-contained actions on their
   own seconds clock and are deliberately not shifted by `merge`'s
   tick-based `time_offset`.
+- `tests/node_graph_props.rs` — deterministic property tests over the
+  3D node surface: decompose/recompose round-trips and
+  inverse-times-matrix identity across 300 random TRS transforms
+  each, random-tree `global_matrices` checked against the manual
+  parent-chain product and the `global(parent) * local` spec rule,
+  slerp unit-length/endpoint invariants, linear-sampler exactness at
+  keyframes with segment-bounded midpoints, all-modes exact-timestamp
+  agreement, and animated poses cross-checked against manually posed
+  graphs.
 - `node` module — typed 3D node local transform + flat node graph, the
   placement half of the 3D surface that `light` (energy) and
   `material` (surface response) anticipate. Models the glTF 2.0 core
