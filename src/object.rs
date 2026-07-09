@@ -236,8 +236,8 @@ impl SceneObject {
     ///   are offsets from the base, matching the documented
     ///   `Operation::SetTransform` semantics ("animations on the
     ///   same object continue to add to this base").
-    /// - `Scale` (Vec2) — *multiplied* with base `scale`. Matches the
-    ///   convention used by After Effects / Lottie scale tracks.
+    /// - `Scale` (Vec2) — *multiplied* with base `scale`. Scale is a
+    ///   factor rather than an offset, so a unit base stays identity.
     /// - `Rotation` (Scalar, radians) — *added* to base `rotation`.
     /// - `Skew` (Vec2, radians) — *added* to base `skew`.
     /// - `Anchor` (Vec2, normalised 0..=1) — *replaces* base `anchor`.
