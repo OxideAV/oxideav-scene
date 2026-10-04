@@ -136,14 +136,14 @@ raster renderer. Encoding and file-format I/O are still follow-ups.
   scene; `Scene::merge` concatenates lights and materials verbatim
   and rebases node-graph indices (children, roots, channel targets)
   so merged hierarchies keep their meaning.
-- No `oxideav-codec` or container integration yet — that comes after
+- No codec or container integration yet — that comes after
   the render pipeline is real.
 
 ## Data model
 
 ### Scene
 
-```rust
+```rust,ignore
 pub struct Scene {
     pub canvas: Canvas,               // pixel dims OR a vector-coord PDF page
     pub duration: SceneDuration,      // Finite(dur) | Indefinite (streaming)
@@ -177,7 +177,7 @@ operation messages.
 
 ### Canvas
 
-```rust
+```rust,ignore
 pub enum Canvas {
     /// Pixel-based raster canvas. NLE + streaming compositor use this.
     Raster { width: u32, height: u32, pixel_format: PixelFormat },
@@ -195,7 +195,7 @@ compositor streams, and NLE timelines without forking the API.
 
 ### SceneObject
 
-```rust
+```rust,ignore
 pub struct SceneObject {
     pub id: ObjectId,                 // stable across edits/operations
     pub kind: ObjectKind,             // what it IS
@@ -212,7 +212,7 @@ pub struct SceneObject {
 
 ### ObjectKind
 
-```rust
+```rust,ignore
 pub enum ObjectKind {
     /// Static bitmap — PNG/JPEG/raw, decoded upstream into a VideoFrame.
     Image(ImageSource),
@@ -237,6 +237,10 @@ pub enum ObjectKind {
     /// Packets arrive asynchronously; the compositor uses the most
     /// recent frame available at render time.
     Live(LiveStreamHandle),
+
+    /// Self-contained vector content — consumed as-is by vector
+    /// outputs (PDF / SVG), rasterised for raster outputs.
+    Vector(oxideav_core::VectorFrame),
 }
 ```
 
@@ -247,7 +251,7 @@ requires `Arc`-shared frame storage (managed by oxideav-core).
 
 ### Transform + Animation
 
-```rust
+```rust,ignore
 pub struct Transform {
     pub position: (f32, f32),   // canvas units
     pub scale: (f32, f32),      // 1.0 = natural size
@@ -264,7 +268,7 @@ pub struct Animation {
 }
 
 pub enum AnimatedProperty {
-    Position, Scale, Rotation, Opacity, Skew, Anchor,
+    Position, Scale, Rotation, Opacity, Skew, Anchor, Volume,
     EffectParam { effect_idx: usize, param: &'static str },
     Custom(String),  // SceneObjectContent defines semantics
 }
@@ -272,7 +276,7 @@ pub enum AnimatedProperty {
 pub enum Easing {
     Linear, EaseIn, EaseOut, EaseInOut,
     CubicBezier(f32, f32, f32, f32),  // CSS / AE compatible
-    Step(usize),                      // N stepped frames
+    Step(u32),                        // N stepped frames
     Hold,                             // no interpolation — discrete
 }
 ```
@@ -326,12 +330,13 @@ to walk the object list by hand:
 
 ### AudioCue
 
-```rust
+```rust,ignore
 pub struct AudioCue {
     pub trigger: TimeStamp,          // when playback starts in scene time
     pub source: AudioSource,         // file / clip / generator
     pub volume: Animation,           // animated 0.0..=1.0
     pub duck: Vec<DuckBus>,          // other cues to attenuate while playing
+    pub end: Option<TimeStamp>,      // explicit stop time; None = natural end
 }
 ```
 
