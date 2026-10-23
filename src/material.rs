@@ -418,8 +418,8 @@ impl Material {
                 .iter()
                 .all(|c| c.is_finite() && (0.0..=1.0).contains(c))
             && self.alpha_mode.is_valid()
-            && self.occlusion_texture.map_or(true, |t| t.is_valid())
-            && self.normal_texture.map_or(true, |t| t.scale.is_finite())
+            && self.occlusion_texture.is_none_or(|t| t.is_valid())
+            && self.normal_texture.is_none_or(|t| t.scale.is_finite())
     }
 
     /// `true` when the material emits light: a non-zero emissive

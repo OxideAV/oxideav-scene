@@ -86,7 +86,7 @@ pub mod source;
 pub mod svg_path;
 pub mod text;
 
-pub use adapt::{adapt_frame_to, adapt_frame_to_canvas, AdaptedSource};
+pub use adapt::{AdaptedSource, adapt_frame_to, adapt_frame_to_canvas};
 pub use animation::{AnimatedProperty, Animation, Easing, Keyframe, KeyframeValue, Repeat};
 pub use audio::{AudioCue, AudioSource, DuckBus, Generator};
 pub use audio_mix::mix_cues;
@@ -98,8 +98,8 @@ pub use material::{
     TextureBinding,
 };
 pub use node::{
-    quat_conjugate, quat_dot, quat_from_axis_angle, quat_mul, quat_normalize, quat_slerp, Mat4,
-    NodeGraph, NodeGraphError, NodeTransform, SceneNode,
+    Mat4, NodeGraph, NodeGraphError, NodeTransform, SceneNode, quat_conjugate, quat_dot,
+    quat_from_axis_angle, quat_mul, quat_normalize, quat_slerp,
 };
 pub use node_animation::{
     AnimationChannel, AnimationSampler, Interpolation, NodeAnimation, NodeAnimationError,
@@ -116,6 +116,6 @@ pub use raster::rasterize_vector;
 pub use raster_renderer::RasterRenderer;
 pub use render::{RenderedFrame, SceneRenderer, SceneSampler, StubRenderer};
 pub use scene::{Background, Metadata, Scene};
-pub use source::{drive, FnSink, NullSink, RenderedSource, SceneSink, SceneSource, SourceFormat};
-pub use svg_path::{parse_path as parse_svg_path, SvgPathError};
+pub use source::{FnSink, NullSink, RenderedSource, SceneSink, SceneSource, SourceFormat, drive};
+pub use svg_path::{SvgPathError, parse_path as parse_svg_path};
 pub use text::TextRenderer;

@@ -3,7 +3,7 @@
 //! against closed-form invariants.
 
 use oxideav_scene::node::{
-    quat_dot, quat_normalize, quat_slerp, Mat4, NodeGraph, NodeTransform, SceneNode,
+    Mat4, NodeGraph, NodeTransform, SceneNode, quat_dot, quat_normalize, quat_slerp,
 };
 use oxideav_scene::node_animation::{
     AnimationChannel, AnimationSampler, Interpolation, NodeAnimation, SampledValue, TargetPath,

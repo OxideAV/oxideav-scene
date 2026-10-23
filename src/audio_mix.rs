@@ -229,10 +229,10 @@ fn mix_one_cue(scene: &Scene, cue: &AudioCue, interval_start: TimeStamp, buf: &m
         if abs_sample < trigger_sample_index {
             continue;
         }
-        if let Some(end_idx) = end_sample_index {
-            if abs_sample >= end_idx {
-                continue;
-            }
+        if let Some(end_idx) = end_sample_index
+            && abs_sample >= end_idx
+        {
+            continue;
         }
         // Volume sampled at the slot's tick. Tick granularity is
         // coarser than per-sample for sub-tick sample rates; that's

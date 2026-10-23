@@ -865,10 +865,10 @@ impl NodeGraph {
         let mut parents = vec![None; self.nodes.len()];
         for (i, node) in self.nodes.iter().enumerate() {
             for &child in &node.children {
-                if let Some(slot) = parents.get_mut(child) {
-                    if slot.is_none() {
-                        *slot = Some(i);
-                    }
+                if let Some(slot) = parents.get_mut(child)
+                    && slot.is_none()
+                {
+                    *slot = Some(i);
                 }
             }
         }
@@ -951,13 +951,13 @@ impl NodeGraph {
 
         // 4. Roots are parentless.
         for (child, parent) in parents.iter().enumerate() {
-            if let Some(parent) = *parent {
-                if is_root[child] {
-                    return Err(NodeGraphError::RootHasParent {
-                        root: child,
-                        parent,
-                    });
-                }
+            if let Some(parent) = *parent
+                && is_root[child]
+            {
+                return Err(NodeGraphError::RootHasParent {
+                    root: child,
+                    parent,
+                });
             }
         }
 

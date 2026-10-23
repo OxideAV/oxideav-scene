@@ -74,9 +74,10 @@ fn empty_scene_bbox_is_none_for_any_time() {
     for _ in 0..200 {
         // i64 in a wide but legal range.
         let t = (rng.next_u64() as i64) >> 8;
-        assert!(s
-            .bbox_at(t, (rng.range(0.0, 1000.0), rng.range(0.0, 1000.0)))
-            .is_none());
+        assert!(
+            s.bbox_at(t, (rng.range(0.0, 1000.0), rng.range(0.0, 1000.0)))
+                .is_none()
+        );
     }
 }
 

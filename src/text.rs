@@ -467,11 +467,7 @@ fn decode_rgba(packed: u32) -> [u8; 4] {
 /// silently swallow that for clearly malformed `TextRun`s, fall back
 /// to a tiny default so the renderer keeps producing output.
 fn sane_size(s: f32) -> f32 {
-    if s.is_finite() && s > 0.0 {
-        s
-    } else {
-        1.0
-    }
+    if s.is_finite() && s > 0.0 { s } else { 1.0 }
 }
 
 /// Apply a "fake italic" by horizontally shearing the rasterised
@@ -631,7 +627,7 @@ mod tests {
             .unwrap();
 
         // 1. Total lit pixel count is non-trivial.
-        let lit = dst.chunks_exact(4).filter(|p| p[3] > 0).count();
+        let lit = dst.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
         assert!(
             lit > 50,
             "expected glyph coverage; got only {lit} lit pixels"
@@ -673,7 +669,7 @@ mod tests {
         }
         // At least one solidly-lit pixel should be red-dominant.
         let mut found_red = false;
-        for px in bm.data.chunks_exact(4) {
+        for px in bm.data.as_chunks::<4>().0 {
             if px[3] > 200 && px[0] > 200 && px[1] < 60 && px[2] < 60 {
                 found_red = true;
                 break;
@@ -711,7 +707,13 @@ mod tests {
         // assert "no lit pixels" instead of strict emptiness so the
         // contract isn't tightened beyond what the previous Scribe
         // path guaranteed.
-        let lit = bm.data.chunks_exact(4).filter(|p| p[3] > 0).count();
+        let lit = bm
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0)
+            .count();
         assert_eq!(lit, 0);
     }
 

@@ -783,7 +783,9 @@ mod tests {
         // No objects, transparent bg → fully clear.
         let lit = frame.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] != 0)
             .count();
         assert_eq!(lit, 0);
@@ -955,7 +957,9 @@ mod tests {
         let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
         let lit = frame.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] != 0)
             .count();
         assert_eq!(lit, 0);
@@ -1337,7 +1341,9 @@ mod tests {
         let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
         let lit = frame.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] != 0)
             .count();
         assert_eq!(lit, 0, "no backdrop → canvas stays fully clear");
@@ -1406,7 +1412,9 @@ mod tests {
         let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
         let lit = frame.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] != 0)
             .count();
         assert_eq!(lit, 0, "empty video sequence emits no pixels");
@@ -1626,7 +1634,9 @@ mod tests {
         let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
         let lit = frame.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] != 0)
             .count();
         assert_eq!(lit, 0, "no node → canvas stays fully clear");

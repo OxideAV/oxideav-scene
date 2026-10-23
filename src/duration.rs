@@ -55,7 +55,7 @@ pub struct Lifetime {
 impl Lifetime {
     /// Whether the object should be drawn at time `t`.
     pub fn is_live_at(&self, t: TimeStamp) -> bool {
-        t >= self.start && self.end.map_or(true, |end| t < end)
+        t >= self.start && self.end.is_none_or(|end| t < end)
     }
 }
 

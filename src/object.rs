@@ -1004,9 +1004,11 @@ mod tests {
 
     #[test]
     fn text_and_group_have_no_intrinsic_extent() {
-        assert!(ObjectKind::Text(TextRun::default())
-            .content_size()
-            .is_none());
+        assert!(
+            ObjectKind::Text(TextRun::default())
+                .content_size()
+                .is_none()
+        );
         assert!(ObjectKind::Group(Vec::new()).content_size().is_none());
     }
 
@@ -1105,15 +1107,19 @@ mod tests {
     #[test]
     fn video_source_frame_at_returns_none_for_decoder_bound_arms() {
         assert!(VideoSource::Path("x.mp4".into()).frame_at(0, 0).is_none());
-        assert!(VideoSource::EncodedBytes(vec![0u8; 4].into())
+        assert!(
+            VideoSource::EncodedBytes(vec![0u8; 4].into())
+                .frame_at(0, 0)
+                .is_none()
+        );
+        assert!(
+            VideoSource::DecodedFrames {
+                frames: Vec::new(),
+                frame_duration: 10,
+            }
             .frame_at(0, 0)
-            .is_none());
-        assert!(VideoSource::DecodedFrames {
-            frames: Vec::new(),
-            frame_duration: 10,
-        }
-        .frame_at(0, 0)
-        .is_none());
+            .is_none()
+        );
     }
 
     #[test]

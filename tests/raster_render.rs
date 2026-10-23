@@ -316,7 +316,9 @@ fn shape_path_with_invalid_arc_flag_is_skipped() {
     let frame = r.render_at(&scene, 0).unwrap().video.unwrap();
     let lit = frame.planes[0]
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| p[3] != 0)
         .count();
     assert_eq!(lit, 0);

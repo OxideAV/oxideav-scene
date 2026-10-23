@@ -180,10 +180,10 @@ impl<R: SceneRenderer> SceneSource for RenderedSource<R> {
     }
 
     fn pull(&mut self) -> Result<Option<RenderedFrame>> {
-        if let Some(total) = self.total_frames {
-            if self.next_frame >= total {
-                return Ok(None);
-            }
+        if let Some(total) = self.total_frames
+            && self.next_frame >= total
+        {
+            return Ok(None);
         }
         if !self.prepared {
             self.renderer.prepare(&self.scene)?;

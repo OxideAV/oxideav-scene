@@ -77,7 +77,7 @@
 //! assert!((origin[0] - 5.0).abs() < 1e-6);
 //! ```
 
-use crate::node::{quat_normalize, quat_slerp, Mat4, NodeGraph, NodeTransform};
+use crate::node::{Mat4, NodeGraph, NodeTransform, quat_normalize, quat_slerp};
 
 /// Which local-transform property of the target node a channel
 /// animates. Non-animated properties keep their base values.
@@ -616,7 +616,7 @@ fn descend_posed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{quat_from_axis_angle, SceneNode};
+    use crate::node::{SceneNode, quat_from_axis_angle};
     use std::f32::consts::FRAC_PI_2;
 
     fn approx(a: f32, b: f32) -> bool {

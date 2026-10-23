@@ -65,7 +65,7 @@ fn scene_text_object_rasterises_end_to_end() {
         .unwrap();
 
     // Total lit pixel count is non-trivial.
-    let lit = dst.chunks_exact(4).filter(|p| p[3] > 0).count();
+    let lit = dst.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
     assert!(
         lit > 100,
         "scene TextRenderer produced only {lit} lit pixels — expected real glyph coverage"
