@@ -63,6 +63,7 @@ pub enum Generator {
 /// `attack_ms` / `release_ms` control the envelope around the
 /// trigger.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct DuckBus {
     pub bus: u32,
     pub reduction_db: f32,

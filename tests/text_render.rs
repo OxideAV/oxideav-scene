@@ -32,21 +32,17 @@ fn scene_text_object_rasterises_end_to_end() {
 
     // Build a SceneObject carrying a TextRun. This is the same shape
     // a downstream caller would put into Scene::objects.
-    let text_run = TextRun {
-        text: "Hello, world!".to_string(),
-        font_family: "DejaVu Sans".to_string(),
-        font_weight: 400,
-        font_size: 24.0,
-        color: 0xFFFFFFFF,
-        advances: None,
-        italic: false,
-        underline: false,
-    };
-    let obj = SceneObject {
-        id: ObjectId::new(1),
-        kind: ObjectKind::Text(text_run.clone()),
-        ..SceneObject::default()
-    };
+    let text_run = TextRun::default()
+        .with_text("Hello, world!".to_string())
+        .with_font_family("DejaVu Sans".to_string())
+        .with_font_weight(400)
+        .with_font_size(24.0)
+        .with_color(0xFFFFFFFF)
+        .with_italic(false)
+        .with_underline(false);
+    let obj = SceneObject::default()
+        .with_id(ObjectId::new(1))
+        .with_kind(ObjectKind::Text(text_run.clone()));
     // Sanity: the object actually carries a Text payload.
     assert!(matches!(obj.kind, ObjectKind::Text(_)));
 
@@ -79,16 +75,14 @@ fn scene_wrapped_text_stacks_lines() {
         None => return,
     };
     let mut tr = TextRenderer::new(face);
-    let run = TextRun {
-        text: "one two three four five six seven eight nine ten".to_string(),
-        font_family: "DejaVu Sans".to_string(),
-        font_weight: 400,
-        font_size: 16.0,
-        color: 0xFFFFFFFF,
-        advances: None,
-        italic: false,
-        underline: false,
-    };
+    let run = TextRun::default()
+        .with_text("one two three four five six seven eight nine ten".to_string())
+        .with_font_family("DejaVu Sans".to_string())
+        .with_font_weight(400)
+        .with_font_size(16.0)
+        .with_color(0xFFFFFFFF)
+        .with_italic(false)
+        .with_underline(false);
     let lines = tr.render_run_wrapped(&run, 100.0).unwrap();
     assert!(
         lines.len() >= 2,

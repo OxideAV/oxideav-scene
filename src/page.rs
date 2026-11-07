@@ -65,6 +65,38 @@ pub struct Page {
     pub orientation: u16,
 }
 
+impl Page {
+    /// Set `width`.
+    pub fn with_width(mut self, v: f32) -> Self {
+        self.width = v;
+        self
+    }
+
+    /// Set `height`.
+    pub fn with_height(mut self, v: f32) -> Self {
+        self.height = v;
+        self
+    }
+
+    /// Set `content`.
+    pub fn with_content(mut self, v: VectorFrame) -> Self {
+        self.content = v;
+        self
+    }
+
+    /// Set `label`.
+    pub fn with_label(mut self, v: impl Into<String>) -> Self {
+        self.label = Some(v.into());
+        self
+    }
+
+    /// Set `orientation`.
+    pub fn with_orientation(mut self, v: u16) -> Self {
+        self.orientation = v;
+        self
+    }
+}
+
 /// Build an empty [`VectorFrame`] sized to `(width, height)` in the
 /// page's own coordinate system. Used by both [`Page::default`] and
 /// [`Page::new`].

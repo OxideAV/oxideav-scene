@@ -48,6 +48,7 @@ use oxideav_core::{Path, PathCommand, Point};
 
 /// Reasons the path data could not be lowered to a [`Path`].
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SvgPathError {
     /// A command letter outside the supported set. With arc (`A` / `a`)
     /// now handled, this is only reached on entirely unknown letters.

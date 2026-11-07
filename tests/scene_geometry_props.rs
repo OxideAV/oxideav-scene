@@ -48,22 +48,20 @@ fn rand_rect_object(rng: &mut Rng, id: u64) -> (SceneObject, f32, f32, f32, f32)
     let x = rng.range(-500.0, 500.0);
     let y = rng.range(-500.0, 500.0);
     let z = rng.range_i(-10, 10);
-    let obj = SceneObject {
-        id: ObjectId::new(id),
-        kind: ObjectKind::Shape(Shape::Rect {
+    let obj = SceneObject::default()
+        .with_id(ObjectId::new(id))
+        .with_kind(ObjectKind::Shape(Shape::Rect {
             width: w,
             height: h,
             fill: 0,
             stroke: None,
             corner_radius: 0.0,
-        }),
-        transform: Transform {
+        }))
+        .with_transform(Transform {
             position: (x, y),
             ..Transform::identity()
-        },
-        z_order: z,
-        ..SceneObject::default()
-    };
+        })
+        .with_z_order(z);
     (obj, x, y, w, h)
 }
 
@@ -153,21 +151,19 @@ fn union_bbox_drops_dead_objects() {
         // Append a few "dead" objects with disjoint lifetimes far from
         // the live one's footprint.
         for i in 2..6u64 {
-            let mut dead = SceneObject {
-                id: ObjectId::new(i),
-                kind: ObjectKind::Shape(Shape::Rect {
+            let mut dead = SceneObject::default()
+                .with_id(ObjectId::new(i))
+                .with_kind(ObjectKind::Shape(Shape::Rect {
                     width: 50.0,
                     height: 50.0,
                     fill: 0,
                     stroke: None,
                     corner_radius: 0.0,
-                }),
-                transform: Transform {
+                }))
+                .with_transform(Transform {
                     position: (10_000.0, 10_000.0),
                     ..Transform::identity()
-                },
-                ..SceneObject::default()
-            };
+                });
             dead.lifetime = Lifetime {
                 start: 500,
                 end: Some(900),
@@ -196,22 +192,20 @@ fn hit_test_top_z_order_wins() {
         let mut top_z = i32::MIN;
         let mut top_idx: i64 = -1;
         for i in 0..n {
-            let obj = SceneObject {
-                id: ObjectId::new(i + 1),
-                kind: ObjectKind::Shape(Shape::Rect {
+            let obj = SceneObject::default()
+                .with_id(ObjectId::new(i + 1))
+                .with_kind(ObjectKind::Shape(Shape::Rect {
                     width: 100.0,
                     height: 100.0,
                     fill: 0,
                     stroke: None,
                     corner_radius: 0.0,
-                }),
-                transform: Transform {
+                }))
+                .with_transform(Transform {
                     position: (0.0, 0.0),
                     ..Transform::identity()
-                },
-                z_order: rng.range_i(-5, 5),
-                ..SceneObject::default()
-            };
+                })
+                .with_z_order(rng.range_i(-5, 5));
             // Tie-break: equal z + later index wins.
             if obj.z_order > top_z || (obj.z_order == top_z && (i as i64) > top_idx) {
                 top_z = obj.z_order;
@@ -253,21 +247,19 @@ fn clip_collapses_union_contribution() {
         let mut s = Scene::default();
         let (anchor, ax, ay, aw, ah) = rand_rect_object(&mut rng, 1);
         s.objects.push(anchor);
-        let mut bad = SceneObject {
-            id: ObjectId::new(2),
-            kind: ObjectKind::Shape(Shape::Rect {
+        let mut bad = SceneObject::default()
+            .with_id(ObjectId::new(2))
+            .with_kind(ObjectKind::Shape(Shape::Rect {
                 width: 5_000.0,
                 height: 5_000.0,
                 fill: 0,
                 stroke: None,
                 corner_radius: 0.0,
-            }),
-            transform: Transform {
+            }))
+            .with_transform(Transform {
                 position: (2_000.0, 2_000.0),
                 ..Transform::identity()
-            },
-            ..SceneObject::default()
-        };
+            });
         // Clip far away from `bad`'s actual position.
         bad.clip = Some(ClipRect {
             x: -10_000.0,

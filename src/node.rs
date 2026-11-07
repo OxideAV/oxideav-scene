@@ -809,6 +809,7 @@ impl std::error::Error for NodeGraphError {}
 /// traversal helpers below assume that invariant.
 /// [`NodeGraph::validate`] checks it for untrusted input.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct NodeGraph {
     /// All nodes, flat. Children reference each other by index.
     pub nodes: Vec<SceneNode>,

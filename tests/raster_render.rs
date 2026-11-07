@@ -13,23 +13,21 @@ fn pixel(data: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
 }
 
 fn top_left_rect(id: u64, x: f32, y: f32, w: f32, h: f32, fill: u32, z: i32) -> SceneObject {
-    SceneObject {
-        id: ObjectId::new(id),
-        kind: ObjectKind::Shape(Shape::Rect {
+    SceneObject::default()
+        .with_id(ObjectId::new(id))
+        .with_kind(ObjectKind::Shape(Shape::Rect {
             width: w,
             height: h,
             fill,
             stroke: None,
             corner_radius: 0.0,
-        }),
-        transform: Transform {
+        }))
+        .with_transform(Transform {
             position: (x, y),
             anchor: (0.0, 0.0),
             ..Transform::identity()
-        },
-        z_order: z,
-        ..SceneObject::default()
-    }
+        })
+        .with_z_order(z)
 }
 
 #[test]
@@ -96,16 +94,14 @@ fn drives_a_finite_scene_to_frames() {
 fn group_composes_children_under_group_transform() {
     // Two child rects inside a group; the group is translated +20, +20.
     // Each child rect should land at (group_pos + child_pos).
-    let parent = SceneObject {
-        id: ObjectId::new(100),
-        kind: ObjectKind::Group(vec![ObjectId::new(1), ObjectId::new(2)]),
-        transform: Transform {
+    let parent = SceneObject::default()
+        .with_id(ObjectId::new(100))
+        .with_kind(ObjectKind::Group(vec![ObjectId::new(1), ObjectId::new(2)]))
+        .with_transform(Transform {
             position: (20.0, 20.0),
             anchor: (0.0, 0.0),
             ..Transform::identity()
-        },
-        ..SceneObject::default()
-    };
+        });
     let child1 = top_left_rect(1, 0.0, 0.0, 8.0, 8.0, 0xFF0000FF, 0);
     let child2 = top_left_rect(2, 20.0, 0.0, 8.0, 8.0, 0x00FF00FF, 0);
 
@@ -139,11 +135,9 @@ fn group_composes_children_under_group_transform() {
 #[test]
 fn group_opacity_multiplies_through_children() {
     // Group opacity 0.5, child opacity 1.0 → effective coverage drops.
-    let mut parent = SceneObject {
-        id: ObjectId::new(100),
-        kind: ObjectKind::Group(vec![ObjectId::new(1)]),
-        ..SceneObject::default()
-    };
+    let mut parent = SceneObject::default()
+        .with_id(ObjectId::new(100))
+        .with_kind(ObjectKind::Group(vec![ObjectId::new(1)]));
     parent.opacity = 0.5;
     let child = top_left_rect(1, 0.0, 0.0, 16.0, 16.0, 0xFFFFFFFF, 0);
 
@@ -164,11 +158,9 @@ fn group_opacity_multiplies_through_children() {
 
 #[test]
 fn group_with_missing_child_id_does_not_panic() {
-    let parent = SceneObject {
-        id: ObjectId::new(100),
-        kind: ObjectKind::Group(vec![ObjectId::new(42), ObjectId::new(1)]),
-        ..SceneObject::default()
-    };
+    let parent = SceneObject::default()
+        .with_id(ObjectId::new(100))
+        .with_kind(ObjectKind::Group(vec![ObjectId::new(42), ObjectId::new(1)]));
     let child = top_left_rect(1, 0.0, 0.0, 8.0, 8.0, 0xFFFFFFFF, 0);
 
     let mut scene = Scene {
@@ -189,16 +181,12 @@ fn group_with_missing_child_id_does_not_panic() {
 fn group_cycle_terminates() {
     // Two groups referencing each other — should terminate at the
     // first repeated visit, not loop forever.
-    let g_a = SceneObject {
-        id: ObjectId::new(100),
-        kind: ObjectKind::Group(vec![ObjectId::new(101)]),
-        ..SceneObject::default()
-    };
-    let g_b = SceneObject {
-        id: ObjectId::new(101),
-        kind: ObjectKind::Group(vec![ObjectId::new(100)]),
-        ..SceneObject::default()
-    };
+    let g_a = SceneObject::default()
+        .with_id(ObjectId::new(100))
+        .with_kind(ObjectKind::Group(vec![ObjectId::new(101)]));
+    let g_b = SceneObject::default()
+        .with_id(ObjectId::new(101))
+        .with_kind(ObjectKind::Group(vec![ObjectId::new(100)]));
     let mut scene = Scene {
         canvas: Canvas::raster(8, 8),
         background: Background::Transparent,
@@ -217,20 +205,18 @@ fn group_cycle_terminates() {
 fn shape_path_svg_renders_as_filled_polygon() {
     // Triangle described as SVG path data — pen at top-centre, two
     // diagonals down to the bottom corners, close.
-    let path_obj = SceneObject {
-        id: ObjectId::new(1),
-        kind: ObjectKind::Shape(Shape::Path {
+    let path_obj = SceneObject::default()
+        .with_id(ObjectId::new(1))
+        .with_kind(ObjectKind::Shape(Shape::Path {
             data: "M16,4 L4,28 L28,28 Z".to_string(),
             fill: 0xFFFFFFFF,
             stroke: None,
-        }),
-        transform: Transform {
+        }))
+        .with_transform(Transform {
             position: (0.0, 0.0),
             anchor: (0.0, 0.0),
             ..Transform::identity()
-        },
-        ..SceneObject::default()
-    };
+        });
     let mut scene = Scene {
         canvas: Canvas::raster(32, 32),
         background: Background::Solid(0x000000FF),
@@ -260,15 +246,13 @@ fn shape_path_arc_lowers_to_filled_arc_segment() {
     // centred at (16, 16). The parser turns this into an
     // `PathCommand::ArcTo`, oxideav-raster's `flatten_arc_to_cubics`
     // turns it into cubics, and the rasteriser fills the result.
-    let arc_obj = SceneObject {
-        id: ObjectId::new(1),
-        kind: ObjectKind::Shape(Shape::Path {
+    let arc_obj = SceneObject::default()
+        .with_id(ObjectId::new(1))
+        .with_kind(ObjectKind::Shape(Shape::Path {
             data: "M 0 16 A 16 16 0 0 0 16 0 L 0 0 Z".to_string(),
             fill: 0xFFFFFFFF,
             stroke: None,
-        }),
-        ..SceneObject::default()
-    };
+        }));
     let mut scene = Scene {
         canvas: Canvas::raster(32, 32),
         background: Background::Solid(0x000000FF),
@@ -296,15 +280,13 @@ fn shape_path_with_invalid_arc_flag_is_skipped() {
     // bail; the renderer drops the whole shape rather than partially
     // emitting it. Matches the existing "unparseable → skip silently"
     // contract for any other bad path data.
-    let bad = SceneObject {
-        id: ObjectId::new(1),
-        kind: ObjectKind::Shape(Shape::Path {
+    let bad = SceneObject::default()
+        .with_id(ObjectId::new(1))
+        .with_kind(ObjectKind::Shape(Shape::Path {
             data: "M 0 0 A 5 5 0 2 0 10 10".to_string(),
             fill: 0xFF0000FF,
             stroke: None,
-        }),
-        ..SceneObject::default()
-    };
+        }));
     let mut scene = Scene {
         canvas: Canvas::raster(16, 16),
         background: Background::Transparent,
@@ -327,17 +309,15 @@ fn shape_path_with_invalid_arc_flag_is_skipped() {
 #[test]
 fn group_clip_intersects_with_child_clip_region() {
     // Group with a clip rect that excludes most of the canvas.
-    let parent = SceneObject {
-        id: ObjectId::new(100),
-        kind: ObjectKind::Group(vec![ObjectId::new(1)]),
-        clip: Some(ClipRect {
+    let parent = SceneObject::default()
+        .with_id(ObjectId::new(100))
+        .with_kind(ObjectKind::Group(vec![ObjectId::new(1)]))
+        .with_clip(ClipRect {
             x: 0.0,
             y: 0.0,
             width: 8.0,
             height: 8.0,
-        }),
-        ..SceneObject::default()
-    };
+        });
     let child = top_left_rect(1, 0.0, 0.0, 16.0, 16.0, 0xFFFFFFFF, 0);
     let mut scene = Scene {
         canvas: Canvas::raster(16, 16),

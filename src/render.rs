@@ -13,6 +13,7 @@ use crate::scene::Scene;
 
 /// One output tick.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct RenderedFrame {
     /// Optional reconstructed video frame. `None` for audio-only
     /// intervals or for exporters that don't emit raster.

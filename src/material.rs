@@ -68,6 +68,7 @@
 /// exporting code maintains, plus the `TEXCOORD` set index selecting
 /// which UV attribute drives the lookup (default set `0`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TextureBinding {
     /// Index into the caller-managed texture table.
     pub source: usize,
@@ -97,6 +98,7 @@ impl TextureBinding {
 /// (`scaled = normalize((sample * 2 - 1) * (scale, scale, 1))`).
 /// Default scale `1.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct NormalTextureBinding {
     pub binding: TextureBinding,
     /// X/Y multiplier for the decoded normal vector. Default `1.0`.
@@ -119,6 +121,7 @@ impl NormalTextureBinding {
 /// map, `1.0` applies it fully. Default `1.0`; valid range
 /// `0.0..=1.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct OcclusionTextureBinding {
     pub binding: TextureBinding,
     /// Occlusion amount in `0.0..=1.0`. Default `1.0`.

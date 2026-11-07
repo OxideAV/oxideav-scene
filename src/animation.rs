@@ -10,6 +10,7 @@ use crate::duration::TimeStamp;
 
 /// A keyframe track on one property.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Animation {
     pub property: AnimatedProperty,
     pub keyframes: Vec<Keyframe>,

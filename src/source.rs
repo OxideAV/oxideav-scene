@@ -28,6 +28,7 @@ use crate::scene::Scene;
 /// Everything a sink needs to set up encoders / muxers / windows
 /// before the first frame arrives.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SourceFormat {
     pub canvas: Canvas,
     pub framerate: Rational,
@@ -200,6 +201,7 @@ impl<R: SceneRenderer> SceneSource for RenderedSource<R> {
 /// exercise the pull loop without wiring an encoder. Records a
 /// frame + byte counter so callers can assert progress.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct NullSink {
     pub frames_received: u64,
     pub bytes_received: u64,

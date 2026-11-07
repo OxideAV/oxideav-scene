@@ -63,6 +63,7 @@
 ///   conforming renderers must clamp the light's contribution to zero
 ///   for fragments farther than `r` units away.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct LightCommon {
     pub name: String,
     /// Linear-space RGB. Multiplies the spectral intensity.
@@ -100,6 +101,7 @@ impl Default for LightCommon {
 ///
 /// The defaults (`0.0`, `PI/4`) match the spec.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct SpotParams {
     pub inner_cone_angle: f32,
     pub outer_cone_angle: f32,
@@ -317,6 +319,7 @@ impl Light {
 /// assert_eq!(lamp.position, [3.0, 2.5, -1.0]);
 /// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct LightInstance {
     pub light: Light,
     /// World-space position. Used by [`Light::Point`] and

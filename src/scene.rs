@@ -122,6 +122,92 @@ pub struct Scene {
     pub node_animations: Vec<NodeAnimation>,
 }
 
+impl Scene {
+    /// Set `canvas`.
+    pub fn with_canvas(mut self, v: Canvas) -> Self {
+        self.canvas = v;
+        self
+    }
+
+    /// Set `duration`.
+    pub fn with_duration(mut self, v: SceneDuration) -> Self {
+        self.duration = v;
+        self
+    }
+
+    /// Set `time_base`.
+    pub fn with_time_base(mut self, v: TimeBase) -> Self {
+        self.time_base = v;
+        self
+    }
+
+    /// Set `framerate`.
+    pub fn with_framerate(mut self, v: Rational) -> Self {
+        self.framerate = v;
+        self
+    }
+
+    /// Set `sample_rate`.
+    pub fn with_sample_rate(mut self, v: u32) -> Self {
+        self.sample_rate = v;
+        self
+    }
+
+    /// Set `background`.
+    pub fn with_background(mut self, v: Background) -> Self {
+        self.background = v;
+        self
+    }
+
+    /// Set `objects`.
+    pub fn with_objects(mut self, v: Vec<SceneObject>) -> Self {
+        self.objects = v;
+        self
+    }
+
+    /// Set `audio`.
+    pub fn with_audio(mut self, v: Vec<AudioCue>) -> Self {
+        self.audio = v;
+        self
+    }
+
+    /// Set `metadata`.
+    pub fn with_metadata(mut self, v: Metadata) -> Self {
+        self.metadata = v;
+        self
+    }
+
+    /// Set `pages`.
+    pub fn with_pages(mut self, v: Vec<Page>) -> Self {
+        self.pages = Some(v);
+        self
+    }
+
+    /// Set `lights`.
+    pub fn with_lights(mut self, v: Vec<LightInstance>) -> Self {
+        self.lights = v;
+        self
+    }
+
+    /// Set `materials`.
+    pub fn with_materials(mut self, v: Vec<Material>) -> Self {
+        self.materials = v;
+        self
+    }
+
+    /// Set `node_graph`.
+    pub fn with_node_graph(mut self, v: NodeGraph) -> Self {
+        self.node_graph = v;
+        self
+    }
+
+    /// Set `node_animations`.
+    pub fn with_node_animations(mut self, v: Vec<NodeAnimation>) -> Self {
+        self.node_animations = v;
+        self
+    }
+}
+
 impl Default for Scene {
     fn default() -> Self {
         Scene {
@@ -840,6 +926,62 @@ pub struct Metadata {
     /// so on. Keys are case-sensitive; uniqueness is the caller's
     /// responsibility (the map enforces it).
     pub custom: BTreeMap<String, String>,
+}
+
+impl Metadata {
+    /// Set `title`.
+    pub fn with_title(mut self, v: impl Into<String>) -> Self {
+        self.title = Some(v.into());
+        self
+    }
+
+    /// Set `author`.
+    pub fn with_author(mut self, v: impl Into<String>) -> Self {
+        self.author = Some(v.into());
+        self
+    }
+
+    /// Set `subject`.
+    pub fn with_subject(mut self, v: impl Into<String>) -> Self {
+        self.subject = Some(v.into());
+        self
+    }
+
+    /// Set `keywords`.
+    pub fn with_keywords(mut self, v: Vec<String>) -> Self {
+        self.keywords = v;
+        self
+    }
+
+    /// Set `creator`.
+    pub fn with_creator(mut self, v: impl Into<String>) -> Self {
+        self.creator = Some(v.into());
+        self
+    }
+
+    /// Set `producer`.
+    pub fn with_producer(mut self, v: impl Into<String>) -> Self {
+        self.producer = Some(v.into());
+        self
+    }
+
+    /// Set `created_at`.
+    pub fn with_created_at(mut self, v: impl Into<String>) -> Self {
+        self.created_at = Some(v.into());
+        self
+    }
+
+    /// Set `modified_at`.
+    pub fn with_modified_at(mut self, v: impl Into<String>) -> Self {
+        self.modified_at = Some(v.into());
+        self
+    }
+
+    /// Set `custom`.
+    pub fn with_custom(mut self, v: BTreeMap<String, String>) -> Self {
+        self.custom = v;
+        self
+    }
 }
 
 #[cfg(test)]

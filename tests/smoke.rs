@@ -18,18 +18,18 @@ fn build_a_pdf_page_scene() {
         duration: SceneDuration::Finite(1),
         ..Scene::default()
     };
-    scene.objects.push(SceneObject {
-        id: ObjectId::new(1),
-        kind: ObjectKind::Text(oxideav_scene::TextRun {
-            text: "Hello, world".to_string(),
-            font_family: "Helvetica".to_string(),
-            font_weight: 400,
-            font_size: 12.0,
-            color: 0x000000FF,
-            ..Default::default()
-        }),
-        ..SceneObject::default()
-    });
+    scene.objects.push(
+        SceneObject::default()
+            .with_id(ObjectId::new(1))
+            .with_kind(ObjectKind::Text(
+                oxideav_scene::TextRun::default()
+                    .with_text("Hello, world".to_string())
+                    .with_font_family("Helvetica".to_string())
+                    .with_font_weight(400)
+                    .with_font_size(12.0)
+                    .with_color(0x000000FF),
+            )),
+    );
     assert!(scene.canvas.raster_size().is_none());
     assert_eq!(scene.visible_at(0).len(), 1);
 }
@@ -53,16 +53,16 @@ fn build_an_nle_timeline_scene() {
         ..Scene::default()
     };
     // V1: base clip at z=0
-    scene.objects.push(SceneObject {
-        id: ObjectId::new(1),
-        kind: ObjectKind::Image(ImageSource::Path("clip1.png".into())),
-        lifetime: Lifetime {
-            start: 0,
-            end: Some(5_000),
-        },
-        z_order: 0,
-        ..SceneObject::default()
-    });
+    scene.objects.push(
+        SceneObject::default()
+            .with_id(ObjectId::new(1))
+            .with_kind(ObjectKind::Image(ImageSource::Path("clip1.png".into())))
+            .with_lifetime(Lifetime {
+                start: 0,
+                end: Some(5_000),
+            })
+            .with_z_order(0),
+    );
     // V2: overlay with a fade-in on opacity
     let fade_in = Animation::new(
         AnimatedProperty::Opacity,
@@ -81,17 +81,17 @@ fn build_an_nle_timeline_scene() {
         Easing::EaseInOut,
         Repeat::Once,
     );
-    scene.objects.push(SceneObject {
-        id: ObjectId::new(2),
-        kind: ObjectKind::Image(ImageSource::Path("overlay.png".into())),
-        lifetime: Lifetime {
-            start: 4_000,
-            end: Some(10_000),
-        },
-        animations: vec![fade_in],
-        z_order: 10,
-        ..SceneObject::default()
-    });
+    scene.objects.push(
+        SceneObject::default()
+            .with_id(ObjectId::new(2))
+            .with_kind(ObjectKind::Image(ImageSource::Path("overlay.png".into())))
+            .with_lifetime(Lifetime {
+                start: 4_000,
+                end: Some(10_000),
+            })
+            .with_animations(vec![fade_in])
+            .with_z_order(10),
+    );
     scene.sort_by_z_order();
     let visible_at_4500 = scene.visible_at(4_500);
     assert_eq!(visible_at_4500.len(), 2);
@@ -140,11 +140,11 @@ fn build_a_scene_with_vector_object() {
         time_base: TimeBase::new(1, 1),
     };
     let mut scene = Scene::default();
-    scene.objects.push(SceneObject {
-        id: ObjectId::new(42),
-        kind: ObjectKind::Vector(vf),
-        ..SceneObject::default()
-    });
+    scene.objects.push(
+        SceneObject::default()
+            .with_id(ObjectId::new(42))
+            .with_kind(ObjectKind::Vector(vf)),
+    );
     assert_eq!(scene.objects.len(), 1);
     assert!(matches!(scene.objects[0].kind, ObjectKind::Vector(_)));
 }

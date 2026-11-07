@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `with_<field>` builders on `Scene`, `Metadata`, `Page`, `SceneObject`
+  and `TextRun`.
+
+### Changed
+
+- `#[non_exhaustive]` on `SvgPathError` and on the records `Animation`, `DuckBus`, `Effect`, `LightCommon`, `LightInstance`, `LiveStreamHandle`, `NodeGraph`, `NormalTextureBinding`, `NullSink`, `OcclusionTextureBinding`, `RenderedFrame`, `RgbaBitmap`, `Sample`, `SceneObject`, `SourceFormat`, `SpotParams`, `Stroke`, `TextRun`, `TextureBinding`.
+  `Scene`, `Metadata` and `Page` stay exhaustive for now because sibling
+  crates build them with struct literals (migrate to `Default` + the new
+  `with_*` builders); plain values (`Transform`, `Lifetime`,
+  `Keyframe`, `ClipRect`, `Stop`, `Mat4`) and the glTF-shaped records
+  callers assemble directly (`SceneNode`, `AnimationSampler`,
+  `AnimationChannel`, `NodeAnimation`, `Material`,
+  `PbrMetallicRoughness`, `AudioCue`) stay exhaustive.
+
 ### Changed
 
 - edition 2024, MSRV 1.95
@@ -605,7 +621,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collects every live object's `Sample` in paint order (z ascending,
   ties broken by insertion). `Sample` is re-exported at the crate
   root.
-
 
 ## [0.1.3](https://github.com/OxideAV/oxideav-scene/compare/v0.1.2...v0.1.3) - 2026-05-04
 

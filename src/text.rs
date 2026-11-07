@@ -77,6 +77,7 @@ use crate::object::TextRun;
 /// `oxideav_scribe::RgbaBitmap` so the `TextRenderer` API stays
 /// byte-stable across the round-2 vector-pipeline migration.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RgbaBitmap {
     /// Bitmap width in pixels.
     pub width: u32,

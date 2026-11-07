@@ -71,6 +71,7 @@ pub enum LengthUnit {
 
 /// One renderable element on a scene.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct SceneObject {
     pub id: ObjectId,
     pub kind: ObjectKind,
@@ -82,6 +83,68 @@ pub struct SceneObject {
     pub blend_mode: BlendMode,
     pub effects: Vec<Effect>,
     pub clip: Option<ClipRect>,
+}
+
+impl SceneObject {
+    /// Set `id`.
+    pub fn with_id(mut self, v: ObjectId) -> Self {
+        self.id = v;
+        self
+    }
+
+    /// Set `kind`.
+    pub fn with_kind(mut self, v: ObjectKind) -> Self {
+        self.kind = v;
+        self
+    }
+
+    /// Set `transform`.
+    pub fn with_transform(mut self, v: Transform) -> Self {
+        self.transform = v;
+        self
+    }
+
+    /// Set `lifetime`.
+    pub fn with_lifetime(mut self, v: Lifetime) -> Self {
+        self.lifetime = v;
+        self
+    }
+
+    /// Set `animations`.
+    pub fn with_animations(mut self, v: Vec<Animation>) -> Self {
+        self.animations = v;
+        self
+    }
+
+    /// Set `z_order`.
+    pub fn with_z_order(mut self, v: i32) -> Self {
+        self.z_order = v;
+        self
+    }
+
+    /// Set `opacity`.
+    pub fn with_opacity(mut self, v: f32) -> Self {
+        self.opacity = v;
+        self
+    }
+
+    /// Set `blend_mode`.
+    pub fn with_blend_mode(mut self, v: BlendMode) -> Self {
+        self.blend_mode = v;
+        self
+    }
+
+    /// Set `effects`.
+    pub fn with_effects(mut self, v: Vec<Effect>) -> Self {
+        self.effects = v;
+        self
+    }
+
+    /// Set `clip`.
+    pub fn with_clip(mut self, v: ClipRect) -> Self {
+        self.clip = Some(v);
+        self
+    }
 }
 
 impl Default for SceneObject {
@@ -336,6 +399,7 @@ impl SceneObject {
 /// [`SceneObject`] for that and inlining `kind` would defeat the
 /// "cheap to clone per frame" goal of this struct.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Sample {
     pub id: ObjectId,
     pub z_order: i32,
@@ -515,6 +579,7 @@ pub enum BlendMode {
 /// The parameter map is opaque here; per-effect implementations in
 /// sibling crates interpret it.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Effect {
     pub name: String,
     pub params: Vec<(String, f32)>,
@@ -694,6 +759,7 @@ impl VideoSource {
 /// crate; this type only carries what the model needs to preserve
 /// (the string itself + structural + appearance metadata).
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct TextRun {
     pub text: String,
     pub font_family: String,
@@ -706,6 +772,56 @@ pub struct TextRun {
     pub advances: Option<Vec<f32>>,
     pub italic: bool,
     pub underline: bool,
+}
+
+impl TextRun {
+    /// Set `text`.
+    pub fn with_text(mut self, v: String) -> Self {
+        self.text = v;
+        self
+    }
+
+    /// Set `font_family`.
+    pub fn with_font_family(mut self, v: String) -> Self {
+        self.font_family = v;
+        self
+    }
+
+    /// Set `font_weight`.
+    pub fn with_font_weight(mut self, v: u16) -> Self {
+        self.font_weight = v;
+        self
+    }
+
+    /// Set `font_size`.
+    pub fn with_font_size(mut self, v: f32) -> Self {
+        self.font_size = v;
+        self
+    }
+
+    /// Set `color`.
+    pub fn with_color(mut self, v: u32) -> Self {
+        self.color = v;
+        self
+    }
+
+    /// Set `advances`.
+    pub fn with_advances(mut self, v: Vec<f32>) -> Self {
+        self.advances = Some(v);
+        self
+    }
+
+    /// Set `italic`.
+    pub fn with_italic(mut self, v: bool) -> Self {
+        self.italic = v;
+        self
+    }
+
+    /// Set `underline`.
+    pub fn with_underline(mut self, v: bool) -> Self {
+        self.underline = v;
+        self
+    }
 }
 
 /// Vector shape primitive.
@@ -793,6 +909,7 @@ impl Shape {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Stroke {
     pub color: u32,
     pub width: f32,
@@ -801,6 +918,7 @@ pub struct Stroke {
 /// Opaque handle to a live input feed. The renderer polls it for
 /// the most recent frame at render time.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct LiveStreamHandle {
     /// Implementation-defined URI — `rtmp://…`, `file://named-pipe`,
     /// etc. The streaming compositor resolves this against a
